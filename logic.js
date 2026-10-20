@@ -43,7 +43,27 @@ var AH = (function () {
     return (b.couponCode ? b.couponCode + ' ' : '') + '(' + (b.couponType === 'pct' ? num(b.couponValue) + '%' : '₹' + num(b.couponValue)) + ')';
   }
 
+  /* ---------- Rooms on a booking (one or many) ---------- */
+  function roomsOf(b) {
+    if (b && b.rooms && b.rooms.length) return b.rooms;
+    return b && b.roomId ? [{ roomId: b.roomId, charge: num(b.room) }] : [];
+  }
+  function roomIds(b) { return roomsOf(b).map(function (r) { return r.roomId; }); }
+  function roomTotal(b) { return r2(sum(roomsOf(b), function (r) { return r.charge; })); }
+  /* Per-room GST rate from that room's charge per night after its share of discounts (₹7,500 rule is per unit per day). */
+  function autoRoomRates(b, settings) {
+    var n = nights(b.checkIn, b.checkOut) || 1, rs = roomsOf(b), total = roomTotal(b);
+    var dd = discounts(Object.assign({}, b, { room: total })), share = dd.sub ? dd.total / dd.sub : 0, out = {};
+    rs.forEach(function (r) {
+      var perNight = num(r.charge) * (1 - share) / n;
+      out[r.roomId] = perNight > num(settings.gstThreshold || 7500) ? num(settings.gstRoomHigh) : num(settings.gstRoomLow);
+    });
+    return out;
+  }
+
   function autoRoomGstRate(b, settings) {
+    var rates = autoRoomRates(b, settings), ks = Object.keys(rates);
+    if (ks.length) return Math.max.apply(null, ks.map(function (k) { return rates[k]; }));
     var n = nights(b.checkIn, b.checkOut) || 1;
     var room = num(b.room), dd = discounts(b), sub = dd.sub, disc = dd.total;
     var roomAfter = sub ? room - room * (disc / sub) : room;
@@ -64,21 +84,31 @@ var AH = (function () {
 
     if (isCancelled(b)) {
       var fee = r2(b.cancelFee);
-      c.room = 0; c.food = 0; c.additional = 0; c.discount = 0; c.coupon = 0; c.couponLabel = ''; c.cancelFee = fee;
+      c.room = 0; c.food = 0; c.additional = 0; c.discount = 0; c.coupon = 0; c.couponLabel = ''; c.cancelFee = fee; c.roomParts = [];
       c.subtotal = fee; c.taxable = fee;
       c.gstRoom = 0; c.gstFood = 0; c.gstOther = 0; c.gst = 0;
       c.total = fee;
       c.commission = r2(b.cancelCommission);
     } else {
-      var room = r2(b.room), food = r2(b.food), add = r2(b.additional);
-      var dd = discounts(b), sub = dd.sub, disc = dd.total;
+      var rs = roomsOf(b), room = rs.length && b.rooms && b.rooms.length ? roomTotal(b) : r2(b.room), food = r2(b.food), add = r2(b.additional);
+      var dd = discounts(Object.assign({}, b, { room: room })), sub = dd.sub, disc = dd.total;
       var share = sub ? disc / sub : 0;
       var roomT = r2(room - room * share), foodT = r2(food - food * share);
       var addT = r2(sub - disc - roomT - foodT);
       var on = !!b.gstOn;
       c.room = room; c.food = food; c.additional = add; c.discount = dd.disc; c.coupon = dd.coupon; c.couponLabel = couponLabel(b); c.cancelFee = 0;
       c.subtotal = sub; c.taxable = r2(sub - disc);
-      c.gstRoom = on ? r2(roomT * num(b.gstRoomRate) / 100) : 0;
+      /* GST on rooms, room by room (a room above the ₹7,500 limit can be 18% while others are 5%). */
+      var parts = [], left = roomT;
+      rs.forEach(function (r, i) {
+        var t = i === rs.length - 1 ? r2(left) : (room ? r2(roomT * num(r.charge) / room) : r2(roomT / rs.length));
+        left = r2(left - t);
+        var rate = (!b.gstRateManual && r.gstRate !== undefined && r.gstRate !== '' && r.gstRate !== null) ? num(r.gstRate) : num(b.gstRoomRate);
+        parts.push({ roomId: r.roomId, charge: num(r.charge), taxable: t, rate: rate, gst: on ? r2(t * rate / 100) : 0 });
+      });
+      if (!rs.length) parts.push({ roomId: '', charge: room, taxable: roomT, rate: num(b.gstRoomRate), gst: on ? r2(roomT * num(b.gstRoomRate) / 100) : 0 });
+      c.roomParts = parts;
+      c.gstRoom = on ? r2(sum(parts, function (p) { return p.gst; })) : 0;
       c.gstFood = on ? r2(foodT * num(b.gstFoodRate) / 100) : 0;
       c.gstOther = on ? r2(addT * num(b.gstOtherRate) / 100) : 0;
       c.roomTaxable = roomT; c.foodTaxable = foodT; c.otherTaxable = addT;
@@ -100,18 +130,30 @@ var AH = (function () {
     var keys = ['room', 'food', 'additional', 'discount', 'coupon', 'gst', 'commission', 'cancelFee'];
     if (isCancelled(b)) {
       var d = b.cancelledOn || String(b.updatedAt || b.checkIn).slice(0, 10);
-      var one = { date: d, nights: 0, bookingId: b.id, source: b.source, roomId: b.roomId };
+      var one = { date: d, nights: 0, bookingId: b.id, source: b.source, roomId: roomIds(b)[0] || '' };
       keys.forEach(function (k) { one[k] = num(c[k]); });
       return [finishLine(one)];
     }
-    var n = Math.max(c.nights, 1), out = [];
+    var n = Math.max(c.nights, 1), out = [], rs = roomsOf(b);
+    if (!rs.length) rs = [{ roomId: '', charge: 1 }];
+    var wsum = sum(rs, function (r) { return r.charge; });
+    var weights = rs.map(function (r) { return wsum ? num(r.charge) / wsum : 1 / rs.length; });
     for (var i = 0; i < n; i++) {
-      var ln = { date: addDays(b.checkIn, i), nights: c.nights ? 1 : 0, bookingId: b.id, source: b.source, roomId: b.roomId };
+      var night = {};
       keys.forEach(function (k) {
         var each = r2(num(c[k]) / n);
-        ln[k] = i === n - 1 ? r2(num(c[k]) - each * (n - 1)) : each;
+        night[k] = i === n - 1 ? r2(num(c[k]) - each * (n - 1)) : each;
       });
-      out.push(finishLine(ln));
+      var given = {};
+      rs.forEach(function (r, j) {
+        var ln = { date: addDays(b.checkIn, i), nights: c.nights ? 1 : 0, bookingId: b.id, source: b.source, roomId: r.roomId };
+        keys.forEach(function (k) {
+          given[k] = given[k] || 0;
+          ln[k] = j === rs.length - 1 ? r2(night[k] - given[k]) : r2(night[k] * weights[j]);
+          given[k] = r2(given[k] + ln[k]);
+        });
+        out.push(finishLine(ln));
+      });
     }
     return out;
   }
@@ -243,7 +285,9 @@ var AH = (function () {
     (data.bookings || []).forEach(function (b) {
       if (!isActive(b) || monthOf(b.checkOut) !== ym || !b.gstOn) return;
       var c = calc(b, data.payments);
-      if (c.roomTaxable) add('Accommodation', num(b.gstRoomRate), c.roomTaxable, c.gstRoom);
+      var byRate = {};
+      (c.roomParts || []).forEach(function (p) { if (!p.taxable) return; var x = byRate[p.rate] = byRate[p.rate] || { t: 0, g: 0 }; x.t = r2(x.t + p.taxable); x.g = r2(x.g + p.gst); });
+      Object.keys(byRate).forEach(function (rt) { add('Accommodation', num(rt), byRate[rt].t, byRate[rt].g); });
       if (c.foodTaxable) add('Food', num(b.gstFoodRate), c.foodTaxable, c.gstFood);
       if (c.otherTaxable) add('Other charges', num(b.gstOtherRate), c.otherTaxable, c.gstOther);
     });
@@ -269,10 +313,11 @@ var AH = (function () {
 
   /* Hotel overlap rule: [checkIn, checkOut) ranges. Checkout day may be the next guest's check-in day. */
   function overlaps(bookings, cand) {
-    if (!cand.roomId || !isDate(cand.checkIn) || !isDate(cand.checkOut)) return [];
+    var mine = roomIds(cand);
+    if (!mine.length || !isDate(cand.checkIn) || !isDate(cand.checkOut)) return [];
     return (bookings || []).filter(function (b) {
-      return b.id !== cand.id && b.roomId === cand.roomId && isActive(b) &&
-        b.checkIn < cand.checkOut && cand.checkIn < b.checkOut;
+      return b.id !== cand.id && isActive(b) && b.checkIn < cand.checkOut && cand.checkIn < b.checkOut &&
+        roomIds(b).some(function (r) { return mine.indexOf(r) >= 0; });
     });
   }
 
@@ -294,10 +339,55 @@ var AH = (function () {
     return '';
   }
 
+  /* ---------- Guests on a booking ---------- */
+  function guestsOf(b) {
+    if (b && b.guests && b.guests.length) return b.guests;
+    return b ? [{ id: 'g0', name: b.guestName || '', phone: b.phone || '', nationality: b.nationality || 'Indian', country: b.country || '', idType: b.idType || '', idNumber: b.idValue || '',
+      formCArrival: !!b.formCFiled, formCArrivalAt: b.formCFiledAt || '', legacy: true, docs: [] }] : [];
+  }
+  function foreignGuests(b) { return guestsOf(b).filter(function (g) { return g.nationality === 'Foreign'; }); }
+  function isForeignBooking(b) { return foreignGuests(b).length > 0; }
+  /* Turn the old single-guest fields into guest 1 (keeps the same values). */
+  function migrateGuests(b) {
+    if (b.guests && b.guests.length) return false;
+    var g = guestsOf(b)[0]; delete g.legacy; g.id = 'g-' + (b.id || '').slice(0, 8);
+    g.type = 'Adult'; g.primary = true;
+    b.guests = [g];
+    return true;
+  }
+  /* Arrival Form C still to file: checked-in or arrived, foreign guest, not marked filed. */
   function formCPending(data, today) {
     return (data.bookings || []).filter(function (b) {
-      return b.nationality === 'Foreign' && !b.formCFiled && isActive(b) && b.checkIn <= today;
+      return isActive(b) && b.status !== 'Checked Out' && b.checkIn <= today && foreignGuests(b).some(function (g) { return !g.formCArrival; });
     });
+  }
+  /* Departure entry still to file (within 24 hours of leaving). */
+  function formCDeparturePending(data, today) {
+    return (data.bookings || []).filter(function (b) {
+      return b.status === 'Checked Out' && b.checkOut >= addDays(today, -30) && foreignGuests(b).some(function (g) { return !g.formCDeparture; });
+    });
+  }
+  function guestCountGap(b) { return Math.max(0, num(b.adults) + num(b.children) - guestsOf(b).length); }
+  function docsMissing(b) { return guestsOf(b).filter(function (g) { return g.type !== 'Child' && !(g.docs || []).length; }).length; }
+
+  /* ---------- Booking numbers and Drive folder path ---------- */
+  function bookingNo(n, prefix) { return String(prefix || 'ATH').toUpperCase().replace(/[^A-Z0-9]/g, '') + '-' + String(n).padStart(4, '0'); }
+  function assignBookingNumbers(data) {
+    var bs = data.bookings || [], max = 0, done = 0;
+    bs.forEach(function (b) { var m = String(b.no || '').match(/(\d+)$/); if (m) max = Math.max(max, Number(m[1])); });
+    data.meta = data.meta || {};
+    max = Math.max(max, num(data.meta.lastNo));
+    bs.filter(function (b) { return !b.no; }).sort(function (a, b) { return String(a.createdAt || a.checkIn) < String(b.createdAt || b.checkIn) ? -1 : 1; })
+      .forEach(function (b) { max++; b.no = bookingNo(max, (data.settings || {}).bookingPrefix); done++; });
+    data.meta.lastNo = max;
+    return done;
+  }
+  var MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  function financialYear(d) { var y = Number(d.slice(0, 4)), m = Number(d.slice(5, 7)); var s = m >= 4 ? y : y - 1; return 'FY ' + s + '-' + String((s + 1) % 100).padStart(2, '0'); }
+  function cleanName(x) { return String(x || '').replace(/[\\/:*?"<>|#%\n\r\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60); }
+  function driveFolderPath(b) {
+    var d = isDate(b.checkIn) ? b.checkIn : String(b.createdAt || '').slice(0, 10);
+    return [financialYear(d), d.slice(0, 7) + ' ' + MONTH_NAMES[Number(d.slice(5, 7)) - 1], d, cleanName((b.no || 'Booking') + ' ' + (b.guestName || ''))];
   }
 
   /* Merge incoming backup into existing data by record id; newer updatedAt wins. No duplicates. */
@@ -324,7 +414,10 @@ var AH = (function () {
     var digits = String(b.phone || '').replace(/\D/g, '');
     if (b.phone && (digits.length < 10 || digits.length > 15)) e.phone = 'Phone number should have 10–15 digits.';
     if (b.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(b.email).trim())) e.email = 'Check the email address.';
-    if (!b.roomId) e.roomId = 'Choose a room.';
+    var rids = roomIds(b);
+    if (!rids.length) e.roomId = 'Choose a room.';
+    else if (rids.some(function (r, i) { return !r || rids.indexOf(r) !== i; })) e.roomId = 'Each room can be added only once.';
+    if (roomsOf(b).some(function (r) { return isNaN(Number(r.charge)) || Number(r.charge) < 0; })) e.room = 'Room charges must be positive amounts.';
     if (!isDate(b.checkIn)) e.checkIn = 'Choose a check-in date.';
     if (!isDate(b.checkOut)) e.checkOut = 'Choose a check-out date.';
     if (isDate(b.checkIn) && isDate(b.checkOut) && nights(b.checkIn, b.checkOut) < 1) e.checkOut = 'Check-out must be after check-in.';
@@ -727,7 +820,7 @@ var AH = (function () {
 
   return {
     ACTIVE: ACTIVE, STATUSES: STATUSES, QUERY_STATUSES: QUERY_STATUSES, QUERY_OUTCOMES: QUERY_OUTCOMES,
-    migrateEnquiries: migrateEnquiries, discounts: discounts, couponLabel: couponLabel, freeRooms: freeRooms, couponCandidates: couponCandidates, couponCode: couponCode, quoteAfterCoupon: quoteAfterCoupon, periodRange: periodRange, comparisonRange: comparisonRange, analytics: analytics, pctChange: pctChange, startOfWeek: startOfWeek, IMPORT_FIELDS: IMPORT_FIELDS, parseCSV: parseCSV, guessColumns: guessColumns, parseDateLoose: parseDateLoose, mapChannel: mapChannel, mapStatus: mapStatus, buildImport: buildImport, moneyLoose: moneyLoose, queryConversion: queryConversion, dashboard: dashboard, reviewLinks: reviewLinks, isConverted: isConverted, queryDate: queryDate, METHODS: METHODS, SOURCES: SOURCES, EXPENSE_CATS: EXPENSE_CATS,
+    migrateEnquiries: migrateEnquiries, roomsOf: roomsOf, roomIds: roomIds, roomTotal: roomTotal, autoRoomRates: autoRoomRates, guestsOf: guestsOf, foreignGuests: foreignGuests, isForeignBooking: isForeignBooking, migrateGuests: migrateGuests, formCDeparturePending: formCDeparturePending, guestCountGap: guestCountGap, docsMissing: docsMissing, bookingNo: bookingNo, assignBookingNumbers: assignBookingNumbers, financialYear: financialYear, driveFolderPath: driveFolderPath, cleanName: cleanName, discounts: discounts, couponLabel: couponLabel, freeRooms: freeRooms, couponCandidates: couponCandidates, couponCode: couponCode, quoteAfterCoupon: quoteAfterCoupon, periodRange: periodRange, comparisonRange: comparisonRange, analytics: analytics, pctChange: pctChange, startOfWeek: startOfWeek, IMPORT_FIELDS: IMPORT_FIELDS, parseCSV: parseCSV, guessColumns: guessColumns, parseDateLoose: parseDateLoose, mapChannel: mapChannel, mapStatus: mapStatus, buildImport: buildImport, moneyLoose: moneyLoose, queryConversion: queryConversion, dashboard: dashboard, reviewLinks: reviewLinks, isConverted: isConverted, queryDate: queryDate, METHODS: METHODS, SOURCES: SOURCES, EXPENSE_CATS: EXPENSE_CATS,
     num: num, r2: r2, addDays: addDays, nights: nights, isDate: isDate, monthOf: monthOf, daysInMonth: daysInMonth,
     monthStart: monthStart, monthEnd: monthEnd, prevMonth: prevMonth, isActive: isActive, isCancelled: isCancelled, sum: sum,
     calc: calc, lines: lines, allLines: allLines, totals: totals, collections: collections, outstandingAll: outstandingAll,

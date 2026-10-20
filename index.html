@@ -158,6 +158,18 @@ select.inline{background-color:#fff;margin-bottom:2px}
 .sw{display:inline-block;width:12px;height:10px;border-radius:2px}.sw.a{background:var(--green)}.sw.b{background:var(--gold)}
 .lsvg{width:100%;height:auto;display:block}.lsvg .la{fill:none;stroke:var(--green);stroke-width:2.2}.lsvg .lb{fill:none;stroke:var(--gold);stroke-width:2;stroke-dasharray:4 3}
 .lsvg .gl{stroke:#e6e2d8;stroke-width:1}.lsvg .ax{font-size:9px;fill:#68716a;font-family:var(--sans)}
+.roomline{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) 40px;gap:8px;align-items:center;margin-bottom:8px}
+.guestrow{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 0;border-bottom:1px dashed var(--line);text-decoration:none;color:inherit}
+.guestrow small{color:var(--muted)}.guestrow .flag{margin-top:4px}.chev{color:var(--gold);font-size:22px}
+.tag2{font-size:11px;font-weight:700;background:var(--gold-soft);color:#7a5a20;padding:1px 6px;border-radius:6px}
+.filebtn{position:relative;overflow:hidden}.filebtn input{position:absolute;inset:0;opacity:0;width:100%;height:100%;min-height:0;cursor:pointer}
+.docgrid{display:grid;gap:10px;margin-top:6px}
+.doc{display:grid;grid-template-columns:64px minmax(0,1fr);grid-template-areas:'t m' 't a';gap:4px 10px;border:1px solid var(--line);border-radius:10px;padding:8px}
+.thumb{grid-area:t;width:64px;height:64px;border-radius:8px;background:#eceae4;display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:12px;font-weight:700;color:var(--muted)}
+.thumb img{width:100%;height:100%;object-fit:cover}.dmeta{grid-area:m}.dmeta small{display:block;color:var(--muted)}.dact{grid-area:a;display:flex;gap:6px;flex-wrap:wrap}
+.fcard{padding:6px 14px}.fcsec{font:600 13px var(--sans);color:var(--gold);text-transform:uppercase;letter-spacing:.4px;margin:12px 0 2px}
+.fcrow{display:grid;grid-template-columns:minmax(0,40%) minmax(0,1fr) auto;gap:8px;align-items:center;padding:6px 0;border-bottom:1px dashed #efece4;font-size:14px}
+.fcrow b{word-break:break-word}.muted{color:var(--muted);font-weight:400}
 @media (max-width:360px){.tiles{grid-template-columns:1fr}.three{grid-template-columns:1fr 1fr}}
 @media print{
   header,#tabs,#toast,.noprint,.cta,.alert{display:none!important}
