@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var A = AH, inr = A.inr, num = A.num, r2 = A.r2;
-  var APP_VERSION = '1.4.0';
+  var APP_VERSION = '1.5.0';
 
   /* ---------- tiny helpers ---------- */
   function $(s, el) { return (el || document).querySelector(s); }
@@ -89,7 +89,9 @@
 
   function defaultSettings() {
     return {
-      businessName: 'Athulyam Homes', address: 'Uttarakhand, India', phone: '', email: '', gstin: '',
+      businessName: 'Athulyam Homes', legalName: '', address: A.BUSINESS_DEFAULTS.address, phone: A.BUSINESS_DEFAULTS.phone, email: '', gstin: A.BUSINESS_DEFAULTS.gstin,
+      website: A.BUSINESS_DEFAULTS.website, checkInTime: A.BUSINESS_DEFAULTS.checkInTime, checkOutTime: A.BUSINESS_DEFAULTS.checkOutTime, logo: '',
+      invoicePrefix: 'INV', invoiceStart: 1, sacOther: '',
       billFooter: 'Thank you for staying with us.',
       gstOn: true, gstRoomLow: 5, gstRoomHigh: 18, gstThreshold: 7500, gstFood: 5, gstOther: 18,
       rooms: [
@@ -129,10 +131,45 @@
       data.bookings.forEach(function (b) { if (!b.fbToken) b.fbToken = token(); if (A.migrateGuests(b)) moved++; });
       moved += A.assignBookingNumbers(data);
       if (!data.meta.v14) { data.meta.v14 = nowISO(); data.settings.idMode = 'full'; moved++; }
+      if (!data.meta.v15) {
+        data.meta.v15 = nowISO(); var st = data.settings, D = A.BUSINESS_DEFAULTS;
+        if (!st.address || st.address === 'Uttarakhand, India') st.address = D.address;
+        if (!st.phone) st.phone = D.phone; if (!st.gstin) st.gstin = D.gstin; if (!st.website) st.website = D.website;
+        moved++;
+      }
+      data.deleted = data.deleted || {};
+      trackInit();
       if (moved) return idbPut(JSON.parse(JSON.stringify(data)));
     });
   }
+  /* ---------- change tracking for two-way sync ----------
+     Every record gets a fresh updatedAt when its content changes; removed records are remembered as deleted,
+     so another device that syncs later learns about the deletion instead of bringing the record back. */
+  var DEVICE_KEYS = ['pinHash', 'pinSalt', 'syncToken', 'syncUrl', 'autoSync', 'lockMinutes', 'settingsAt'];
+  var known = {}, knownSettings = '', resetting = false;
+  function fp(x) { return JSON.stringify(x, function (k, v) { return k === 'updatedAt' || k === 'local' || k === 'driveUrl' ? undefined : v; }); }
+  function settingsFp(st) { var o = {}; Object.keys(st || {}).sort().forEach(function (k) { if (DEVICE_KEYS.indexOf(k) < 0) o[k] = st[k]; }); return JSON.stringify(o); }
+  function trackInit() {
+    known = {};
+    A.COLLS.forEach(function (k) { (data[k] || []).forEach(function (r) { if (r && r.id) known[k + ':' + r.id] = fp(r); }); });
+    knownSettings = settingsFp(data.settings);
+  }
+  function trackChanges() {
+    var now = nowISO(), seen = {};
+    data.deleted = data.deleted || {};
+    A.COLLS.forEach(function (k) {
+      (data[k] || []).forEach(function (r) {
+        if (!r || !r.id) return;
+        var key = k + ':' + r.id, f = fp(r); seen[key] = 1;
+        if (known[key] !== f) { r.updatedAt = now; if (!r.createdAt) r.createdAt = now; known[key] = f; }
+      });
+    });
+    Object.keys(known).forEach(function (key) { if (!seen[key]) { if (!resetting) data.deleted[key.split(':').slice(1).join(':')] = now; delete known[key]; } });
+    var sf = settingsFp(data.settings);
+    if (sf !== knownSettings) { data.settings.settingsAt = now; knownSettings = sf; }
+  }
   function save(skipSync) {
+    trackChanges();
     data.meta.updatedAt = nowISO();
     saving = saving.then(function () { return idbPut(JSON.parse(JSON.stringify(data))); }).catch(function (e) {
       toast('Could not save on this device: ' + e.message, true);
@@ -413,6 +450,7 @@
 
       '<div class="card"><h3>Notes</h3>' +
       field('Special requests', '<textarea name="specialRequests" rows="2">' + esc(b.specialRequests) + '</textarea>') +
+      '<details class="fld"><summary>Bill to a company (optional, for GST invoice)</summary><div class="two">' + field('Company name', '<input name="billTo" value="' + esc(b.billTo || '') + '">') + field('Company GSTIN', '<input name="billGstin" value="' + esc(b.billGstin || '') + '" autocapitalize="characters" maxlength="15">') + '</div></details>' +
       field('Internal notes (not on bill)', '<textarea name="notes" rows="2">' + esc(b.notes) + '</textarea>') + '</div>' +
       '<div class="errsum" id="errsum"></div>' +
       '<button class="btn primary big" type="submit">Save booking</button>' +
@@ -446,7 +484,7 @@
   function readForm() {
     var f = $('#bf'), b = formState.b;
     ['guestName', 'phone', 'email', 'nationality', 'country', 'idType', 'idValue', 'adults', 'children', 'checkIn', 'checkOut', 'source', 'status',
-      'food', 'additional', 'additionalNote', 'discount', 'commission', 'gstRoomRate', 'gstFoodRate', 'gstOtherRate', 'specialRequests', 'notes', 'cancelFee', 'cancelCommission']
+      'food', 'additional', 'additionalNote', 'discount', 'commission', 'gstRoomRate', 'gstFoodRate', 'gstOtherRate', 'specialRequests', 'notes', 'cancelFee', 'cancelCommission', 'billTo', 'billGstin']
       .forEach(function (k) { if (f.elements[k]) b[k] = f.elements[k].value; });
     b.gstOn = f.elements.gstOn.checked;
     var lines = $$('#roomsBox .roomline', f);
@@ -558,7 +596,7 @@
       syncPrimaryGuest(b);
       if (formState.isNew) {
         b.id = uid(); b.createdAt = nowISO(); b.fbToken = token(); data.bookings.push(b);
-        data.meta.lastNo = num(data.meta.lastNo) + 1; b.no = A.bookingNo(data.meta.lastNo, S().bookingPrefix);
+        b.no = A.nextBookingNo(data, b.checkIn, S().bookingPrefix);
         if (b.queryId) { var lq = query(b.queryId); if (lq) { lq.status = 'Closed'; lq.outcome = 'Booked'; lq.bookingId = b.id; lq.closedAt = lq.closedAt || nowISO(); lq.updatedAt = nowISO(); } }
         var adv = num(f.elements.advAmount.value);
         if (adv > 0) data.payments.push({ id: uid(), bookingId: b.id, type: 'payment', amount: r2(adv), date: today(), method: f.elements.advMethod.value, ref: f.elements.advRef.value.trim(), createdAt: nowISO(), updatedAt: nowISO() });
@@ -644,7 +682,14 @@
         field('Payout reference', '<input id="po_ref" value="' + esc(b.payoutRef) + '">') + '<button class="btn" id="po_save">Save payout</button></div>' : '') +
       '<div class="card"><h3>Send & share</h3><div class="actions">' +
       (b.phone ? msgs.map(function (m) { return '<a class="btn wa" data-msg="' + m.key + '" target="_blank" rel="noopener" href="' + waLink(b.phone, m.text) + '">WhatsApp: ' + esc(m.label) + '</a>'; }).join('') : '<p class="small">Add a mobile number to send WhatsApp messages.</p>') +
-      '<a class="btn" href="#/bill/' + b.id + '">Guest bill (PDF)</a><button class="btn" id="ics">Add arrival to calendar</button></div></div>' +
+      '<button class="btn" id="ics">Add arrival to calendar</button></div></div>' +
+      '<div class="card"><h3>Confirmation & invoice</h3><div class="actions">' +
+      '<button class="btn primary" data-doc="confirmation">Send confirmation (PDF)</button>' +
+      (b.status === 'Checked Out' && !b.imported ? '<button class="btn primary" data-doc="invoice">Send invoice (PDF)</button>' : '') +
+      '<a class="btn" href="#/bill/' + b.id + '/confirmation">View confirmation</a>' + (b.status === 'Checked Out' ? '<a class="btn" href="#/bill/' + b.id + '/invoice">View invoice</a>' : '') + '</div>' +
+      '<p class="small">' + (b.imported ? 'Imported from your old sheet' + ((b.oldInvoices || []).length ? ' · old invoice ' + esc(b.oldInvoices.join(', ')) : '') + '. No new invoice is made for old stays.' :
+        (b.status === 'Checked Out' ? 'Tax invoice ' + esc(b.invoiceNo || '(numbered at the next sync)') + ' is saved in the booking’s Drive folder.' : 'The tax invoice is made automatically when you mark the guest Checked Out.')) +
+      ' Send opens your share menu with the PDF attached: choose WhatsApp, then the guest. Needs internet and Sheet sync.</p></div>' +
       (b.specialRequests || b.notes ? '<div class="card"><h3>Notes</h3>' + (b.specialRequests ? '<p><b>Requests:</b> ' + esc(b.specialRequests) + '</p>' : '') + (b.notes ? '<p><b>Internal:</b> ' + esc(b.notes) + '</p>' : '') + '</div>' : '') +
       (b.status === 'Checked Out' ? '<div class="card"><h3>Review & feedback</h3>' +
         row('WhatsApp review request', b.reviewWaAt ? 'Opened ' + fmtDate(b.reviewWaAt.slice(0, 10)) : 'Not sent yet') +
@@ -652,7 +697,7 @@
         field('Permission to share their review on other platforms', '<select id="consent">' + options([{ id: '', name: 'Not asked yet' }, { id: 'Yes', name: 'Yes, may share' }, { id: 'No', name: 'No' }], b.reviewConsent || '') + '</select>') +
         field('Given via', '<select id="consentVia">' + options(['WhatsApp reply', 'Feedback form', 'In person', 'Email'], b.consentVia || 'WhatsApp reply') + '</select>') +
         '<p class="small">Feedback-form answers fill this in on the Sheet automatically. Record WhatsApp "YES" replies here.</p></div>' : '') +
-      '<div class="card"><h3>Booking record</h3>' + row('Booking number', esc(b.no || '—')) + (b.email ? row('Email', esc(b.email)) : '') +
+      '<div class="card"><h3>Booking record</h3>' + row('Booking number', esc(b.no || '—')) + (b.invoiceNo ? row('Invoice number', esc(b.invoiceNo)) : '') + (b.billTo || b.billGstin ? row('Bill to', esc([b.billTo, b.billGstin].filter(Boolean).join(' · '))) : '') + (b.email ? row('Email', esc(b.email)) : '') +
       row('Rooms', esc(roomsLabel(b))) + row('Created', b.createdAt ? fmtDate(b.createdAt.slice(0, 10)) : '—') +
       row('Google Drive folder', b.driveUrl ? '<a href="' + esc(b.driveUrl) + '" target="_blank" rel="noopener">Open folder ›</a>' : (S().syncUrl ? 'Made at the next sync' : 'Needs Sheet sync')) +
       '<p class="small">Drive: ' + esc(A.driveFolderPath(b).join(' / ')) + '</p></div>' +
@@ -672,7 +717,7 @@
             }
             b.status = st; b.updatedAt = nowISO();
             if (st === 'Checked In') b.checkedInAt = nowISO();
-            if (st === 'Checked Out') { b.checkedOutAt = nowISO(); S().rooms.forEach(function (x) { if (A.roomIds(b).indexOf(x.id) >= 0) x.clean = false; }); }
+            if (st === 'Checked Out') { b.checkedOutAt = nowISO(); b.checkedOutOn = today(); S().rooms.forEach(function (x) { if (A.roomIds(b).indexOf(x.id) >= 0) x.clean = false; }); }
             save().then(function () { toast(st === 'Checked Out' ? 'Checked out — room marked for cleaning' : 'Status: ' + st); render(); });
           };
         });
@@ -689,6 +734,7 @@
           deliverFile('arrival-' + b.guestName.replace(/\W+/g, '-') + '.ics', ics([{ uid: b.id, start: icsTime(b.checkIn, 12), end: icsTime(b.checkIn, 13), title: 'Arrival: ' + b.guestName + ' (' + roomsLabel(b) + ')', desc: c.nights + ' nights · ' + b.source + ' · balance ' + inr(c.outstanding) + (b.phone ? ' · ' + b.phone : ''), alarm: '-PT4H' }]), 'text/calendar');
         };
         $('#delb').onclick = function () { deleteBooking(b.id); };
+        $$('[data-doc]').forEach(function (btn) { btn.onclick = function () { sendDoc(b, btn.dataset.doc, btn); }; });
         $$('[data-msg="review"]').forEach(function (a) { a.addEventListener('click', function () { b.reviewWaAt = nowISO(); b.updatedAt = nowISO(); save(); }); });
         var cs = $('#consent'), cv = $('#consentVia');
         function saveConsent() { b.reviewConsent = cs.value; b.consentVia = cv.value; b.consentAt = cs.value ? nowISO() : ''; b.updatedAt = nowISO(); save().then(function () { toast('Review permission saved'); }); }
@@ -1288,7 +1334,7 @@
     var crange = range ? A.comparisonRange(range, an.compare, { from: an.cfrom, to: an.cto }) : null;
     var chans = allChannels(), sel = an.channels;
     var filters = '<div class="card noprint"><h3>Filters</h3>' +
-      field('Period', '<select id="anp">' + options([{ id: 'lastWeek', name: 'Last week (Mon–Sun)' }, { id: 'thisWeek', name: 'This week' }, { id: 'lastMonth', name: 'Last month' }, { id: 'thisMonth', name: 'This month to date' }, { id: 'last30', name: 'Last 30 days' }, { id: 'lastYear', name: 'Last year' }, { id: 'thisYear', name: 'This year to date' }, { id: 'season', name: 'Season' }, { id: 'custom', name: 'Custom dates' }], an.preset) + '</select>') +
+      field('Period', '<select id="anp">' + options([{ id: 'lastWeek', name: 'Last week (Mon–Sun)' }, { id: 'thisWeek', name: 'This week' }, { id: 'lastMonth', name: 'Last month' }, { id: 'thisMonth', name: 'This month to date' }, { id: 'last30', name: 'Last 30 days' }, { id: 'thisFY', name: 'This financial year (from 1 April)' }, { id: 'lastFY', name: 'Last financial year' }, { id: 'lastYear', name: 'Last calendar year' }, { id: 'thisYear', name: 'This calendar year to date' }, { id: 'season', name: 'Season' }, { id: 'custom', name: 'Custom dates' }], an.preset) + '</select>') +
       (an.preset === 'season' ? (seasons.length ? field('Season', '<select id="ans">' + options(seasons.map(function (x) { return { id: x.id || x.name, name: x.name + ' (' + fmtShort(x.from) + ' – ' + fmtShort(x.to) + ')' }; }), an.seasonId) + '</select>') : '<div class="warn">No seasons yet. Add them in More → Settings → Season rate card.</div>') : '') +
       (an.preset === 'custom' ? '<div class="two">' + field('From', '<input type="date" id="anf" value="' + esc(an.from) + '">') + field('To', '<input type="date" id="ant" value="' + esc(an.to) + '">') + '</div>' : '') +
       field('Compare with', '<select id="anc">' + options([{ id: 'previous', name: 'Previous period' }, { id: 'lastYear', name: 'Same period last year' }, { id: 'custom', name: 'Custom dates' }, { id: 'none', name: 'No comparison' }], an.compare) + '</select>') +
@@ -1608,37 +1654,83 @@
     };
   };
 
-  /* ---------- GUEST BILL (print to PDF) ---------- */
-  routes.bill = function (id) {
+  /* ---------- CONFIRMATION / INVOICE (print or save as PDF) ---------- */
+  routes.bill = function (arg) {
+    var id = String(arg || '').split('/')[0], kind = String(arg || '').split('/')[1] || '';
     var b = booking(id); if (!b) return { title: 'Not found', html: empty('Booking not found.'), back: '#/bookings' };
-    var c = calc(b), s = S(), pays = A.paymentsFor(b, data.payments);
-    var billNo = b.no || ('AH-' + (b.checkOut || '').replace(/-/g, '') + '-' + b.id.slice(0, 4).toUpperCase());
-    var html = '<div class="actions noprint"><button class="btn primary" onclick="window.print()">Print / Save as PDF</button></div>' +
-      '<div class="bill"><div class="bill-h"><div><div class="bill-brand">' + esc(s.businessName) + '</div><small>' + esc(s.address) + (s.phone ? '<br>☎ ' + esc(s.phone) : '') + (s.email ? ' · ' + esc(s.email) : '') + (s.gstin ? '<br>GSTIN: ' + esc(s.gstin) : '') + '</small></div>' +
-      '<div class="r"><b>' + (b.gstOn ? 'TAX INVOICE' : 'BILL') + '</b><br><small>No. ' + billNo + '<br>Date: ' + fmtDate(b.checkOut) + '</small></div></div>' +
-      '<div class="bill-g"><b>Guest:</b> ' + esc(b.guestName) + (b.phone ? ' · ' + esc(b.phone) : '') + '<br><b>Stay:</b> ' + esc(roomsLabel(b)) + ', ' + fmtDate(b.checkIn) + ' to ' + fmtDate(b.checkOut) + ' (' + c.nights + ' night' + (c.nights === 1 ? '' : 's') + '), ' + b.adults + ' adult(s)' + (num(b.children) ? ', ' + b.children + ' child(ren)' : '') + '</div>' +
-      '<table class="tbl"><tr><th>Description</th><th class="r">Amount</th></tr>' +
-      (A.isCancelled(b) ? '<tr><td>Cancellation charge</td><td class="r">' + inr(c.cancelFee, true) + '</td></tr>' :
-        (c.roomParts || []).map(function (p) { return '<tr><td>Accommodation' + (p.roomId ? ' — ' + esc(roomName(p.roomId)) : '') + ', ' + c.nights + ' night' + (c.nights === 1 ? '' : 's') + (b.gstOn ? ' (SAC 996311)' : '') + '</td><td class="r">' + inr(p.charge, true) + '</td></tr>'; }).join('') +
-        (c.food ? '<tr><td>Food' + (b.gstOn ? ' (SAC 996331)' : '') + '</td><td class="r">' + inr(c.food, true) + '</td></tr>' : '') +
-        (c.additional ? '<tr><td>Additional' + (b.additionalNote ? ': ' + esc(b.additionalNote) : '') + '</td><td class="r">' + inr(c.additional, true) + '</td></tr>' : '') +
-        (c.discount ? '<tr><td>Discount</td><td class="r">−' + inr(c.discount, true) + '</td></tr>' : '') +
-        (c.coupon ? '<tr><td>Coupon ' + esc(c.couponLabel) + '</td><td class="r">−' + inr(c.coupon, true) + '</td></tr>' : '') +
-        (b.gstOn ? '<tr><td>Taxable value</td><td class="r">' + inr(c.taxable, true) + '</td></tr>' +
-          gstByRate(c).map(function (x) { return '<tr><td>CGST ' + x.rate / 2 + '% + SGST ' + x.rate / 2 + '% on accommodation' + (x.taxable ? ' (on ' + inr(x.taxable, true) + ')' : '') + '</td><td class="r">' + inr(x.gst, true) + '</td></tr>'; }).join('') +
-          (c.gstFood ? '<tr><td>CGST ' + b.gstFoodRate / 2 + '% + SGST ' + b.gstFoodRate / 2 + '% on food</td><td class="r">' + inr(c.gstFood, true) + '</td></tr>' : '') +
-          (c.gstOther ? '<tr><td>CGST ' + b.gstOtherRate / 2 + '% + SGST ' + b.gstOtherRate / 2 + '% on other charges</td><td class="r">' + inr(c.gstOther, true) + '</td></tr>' : '') : '')) +
-      '<tr class="strong"><td>Total</td><td class="r">' + inr(c.total, true) + '</td></tr>' +
-      pays.map(function (p) { return '<tr><td>' + (p.type === 'refund' ? 'Refund' : 'Paid') + ' ' + fmtDate(p.date) + ' (' + esc(p.method) + ')</td><td class="r">' + (p.type === 'refund' ? '+' : '−') + inr(p.amount, true) + '</td></tr>'; }).join('') +
-      '<tr class="strong"><td>' + (c.outstanding < 0 ? 'Refund due' : 'Balance due') + '</td><td class="r">' + inr(Math.abs(c.outstanding), true) + '</td></tr></table>' +
-      '<p class="small">' + esc(s.billFooter) + '</p></div>';
-    return { title: 'Guest bill', back: '#/guest/' + b.id, tab: 'bookings', html: html };
+    kind = kind === 'invoice' || (!kind && b.status === 'Checked Out') ? 'invoice' : 'confirmation';
+    var html = '<div class="actions noprint"><button class="btn primary" onclick="window.print()">Print / Save as PDF</button>' +
+      '<a class="btn' + (kind === 'confirmation' ? ' on' : '') + '" href="#/bill/' + b.id + '/confirmation">Confirmation</a>' +
+      (b.status === 'Checked Out' ? '<a class="btn' + (kind === 'invoice' ? ' on' : '') + '" href="#/bill/' + b.id + '/invoice">Invoice</a>' : '') + '</div>' +
+      (kind === 'invoice' && !b.invoiceNo ? '<div class="warn noprint">The invoice number is given by your Google Sheet at the next sync.</div>' : '') +
+      '<div class="docwrap">' + A.docHtml(kind, b, data) + '</div>';
+    return { title: kind === 'invoice' ? 'Tax invoice' : 'Booking confirmation', back: '#/guest/' + b.id, tab: 'bookings', html: html };
+  };
+
+  /* ---------- IMPORT OLD BOOKINGS (prepared file from the Numbers sheets) ---------- */
+  var oldImp = null;
+  routes.importbk = function () {
+    var s = S(), rooms = s.rooms.filter(function (r) { return r.active !== false; });
+    if (!oldImp) {
+      return { title: 'Import old bookings', tab: 'more', back: '#/more', html: '<div class="card"><h3>Step 1 — choose the file</h3><p class="small">Choose <b>athulyam-old-bookings.json</b> (sent to you with this update). It holds the bookings from your old Numbers sheets. It stays on this device until you import; nothing is uploaded.</p>' +
+        '<input type="file" id="obf" accept=".json,application/json"></div>', after: function () {
+          $('#obf').onchange = function () {
+            var f = this.files && this.files[0]; if (!f) return;
+            f.text().then(function (t) {
+              var j = JSON.parse(t); if (j.app !== 'athulyam-old-bookings' || !Array.isArray(j.bookings)) throw new Error('This is not the old-bookings file.');
+              var map = {};
+              Object.keys(j.roomTypes || {}).forEach(function (type) {
+                var whole = /4\s*rooms|whole|entire/i.test(type), key = type.toLowerCase().replace(/\(.*?\)/g, '').replace(/\b(room|rooms)\b/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+                var guess = whole ? rooms.filter(function (r) { return !/villa|2\s*bhk/i.test(r.name); }) : rooms.filter(function (r) {
+                  var n = r.name.toLowerCase(); return key.split(' ').filter(function (w) { return w.length > 2; }).some(function (w) { return n.indexOf(w) >= 0; });
+                });
+                map[type] = { rooms: guess.map(function (r) { return r.id; }), whole: whole };
+              });
+              oldImp = { file: j, map: map }; render();
+            }).catch(function (e) { toast('Could not read the file: ' + e.message, true); });
+          };
+        } };
+    }
+    var j = oldImp.file, past = j.bookings.filter(function (b) { return b.past; }).length;
+    var html = '<div class="card"><h3>' + j.bookings.length + ' bookings found</h3><p class="small">' + past + ' past stays and ' + (j.bookings.length - past) + ' upcoming. Last numbers: ' +
+      Object.keys(j.lastNumbers || {}).map(function (k) { return 'FY ' + esc(k) + ' → ATH-' + String(j.lastNumbers[k]).padStart(3, '0'); }).join(', ') + '. New bookings continue from the next number.</p>' +
+      '<p class="small">Amounts include GST, as in your sheet; the app works out the GST inside them (rooms 12% before 22 Sep 2025, 5% after; food 5%) so every total stays the same.</p></div>' +
+      '<div class="card"><h3>Step 2 — match the old room types to your rooms</h3>' + Object.keys(oldImp.map).map(function (type, ti) {
+        var m = oldImp.map[type];
+        return '<div class="fld"><span><b>' + esc(type) + '</b> <small>(up to ' + j.roomTypes[type] + ' at once)</small></span><div class="chips wrap">' + rooms.map(function (r) {
+          return '<label class="chip' + (m.rooms.indexOf(r.id) >= 0 ? ' on' : '') + '"><input type="checkbox" hidden data-mt="' + ti + '" value="' + r.id + '"' + (m.rooms.indexOf(r.id) >= 0 ? ' checked' : '') + '>' + esc(r.name) + '</label>';
+        }).join('') + '</div><label class="chk sm"><input type="checkbox" data-whole="' + ti + '"' + (m.whole ? ' checked' : '') + '> Whole property: use every room ticked</label></div>';
+      }).join('') + (rooms.length ? '' : '<div class="warn">Add your rooms first in More → Settings.</div>') +
+      '<p class="small">Otherwise a booking uses as many of the ticked rooms as it had in the sheet (for example 2 × Deluxe AC Room).</p></div>' +
+      '<div class="card"><h3>Step 3 — import</h3><p class="small">Past stays are marked as imported: no Drive folder, invoice, Form C or review reminders are made for them. Upcoming ones become normal bookings. Payments are recorded with method “Not recorded”. Stays you already entered in the app are skipped.</p>' +
+      '<button class="btn primary big" id="obgo">Import ' + j.bookings.length + ' bookings</button><button class="btn" id="obcancel">Choose another file</button><div id="obres"></div></div>';
+    return { title: 'Import old bookings', tab: 'more', back: '#/more', html: html, after: function () {
+      var types = Object.keys(oldImp.map);
+      $$('[data-mt]').forEach(function (el) { el.onchange = function () { var m = oldImp.map[types[+el.dataset.mt]]; m.rooms = $$('[data-mt="' + el.dataset.mt + '"]').filter(function (x) { return x.checked; }).map(function (x) { return x.value; }); el.parentNode.classList.toggle('on', el.checked); }; });
+      $$('[data-whole]').forEach(function (el) { el.onchange = function () { oldImp.map[types[+el.dataset.whole]].whole = el.checked; }; });
+      $('#obcancel').onclick = function () { oldImp = null; render(); };
+      $('#obgo').onclick = function () {
+        var miss = types.filter(function (t) { return !oldImp.map[t].rooms.length; });
+        if (miss.length && !confirm('No room ticked for: ' + miss.join(', ') + '. Those bookings will be skipped. Continue?')) return;
+        var res = A.importOld(data, oldImp.file, oldImp.map, { now: nowISO() });
+        res.bookings.forEach(function (b) { data.bookings.push(b); });
+        res.payments.forEach(function (p) { data.payments.push(p); });
+        if (res.bookings.some(function (b) { return b.source === 'Not recorded'; }) && s.sources.indexOf('Not recorded') < 0) s.sources.push('Not recorded');
+        save().then(function () {
+          oldImp = null;
+          $('#main').innerHTML = '<div class="card"><h3>Imported ' + res.bookings.length + ' bookings and ' + res.payments.length + ' payments</h3>' +
+            (res.duplicates.length ? '<p><b>' + res.duplicates.length + ' skipped — already in the app:</b></p><p class="small">' + res.duplicates.map(function (d) { return esc(d.no + ' ' + d.guest + ' (' + d.checkIn + ') = your ' + d.existing); }).join('<br>') + '</p>' : '') +
+            (res.skipped.length ? '<p><b>' + res.skipped.length + ' not imported:</b></p><p class="small">' + res.skipped.map(function (d) { return esc(d.no + ' ' + d.guest + ': ' + d.why); }).join('<br>') + '</p>' : '') +
+            '<p class="small">Next: More → Settings → Sync now. Your laptop and the Sheet get them at their next sync.</p><a class="btn primary" href="#/bookings">See bookings</a> <a class="btn" href="#/analytics">Open analytics</a></div>';
+        });
+      };
+    } };
   };
 
   /* ---------- MORE ---------- */
   routes.more = function () {
     var items = [['today', 'Today’s arrivals & departures'], ['future', 'Future bookings'], ['pending', 'Pending payments'], ['reminders', 'Notifications & reminders'],
-      ['backup', 'Backup & restore'], ['import', 'Import old queries'], ['settings', 'Settings'], ['about', 'Where my data is stored']];
+      ['backup', 'Backup & restore'], ['importbk', 'Import old bookings'], ['import', 'Import old queries'], ['settings', 'Settings'], ['about', 'Where my data is stored']];
     return { title: 'More', tab: 'more', html: items.map(function (i) { return '<a class="card navrow" href="#/' + i[0] + '"><b>' + i[1] + '</b></a>'; }).join('') + '<p class="small center">Version ' + APP_VERSION + '</p>' };
   };
 
@@ -1691,7 +1783,7 @@
       '<input type="file" id="rfile" accept=".json,application/json"><div class="actions"><button class="btn" id="rmerge">Merge from file</button><button class="btn danger" id="rrepl">Replace with file</button></div><div id="rmsg"></div></div>' +
       '<a class="card navrow" href="#/import"><b>Import old queries</b><small>From Numbers, Excel or Google Sheets</small></a>' +
       '<div class="card"><h3>Spreadsheet exports (CSV)</h3><div class="actions"><button class="btn" id="cb">Bookings</button><button class="btn" id="cp">Payments</button><button class="btn" id="ce">Expenses</button><button class="btn" id="cq">Queries</button><button class="btn" id="cgu">Guests & IDs</button></div></div>' +
-      '<div class="card"><h3>Delete all data</h3><p class="small">Removes every record from this phone. Export a backup first.</p><button class="btn danger" id="wipe">Delete everything on this phone</button></div>';
+      '<div class="card"><h3>Clear this device</h3><p class="small">Removes the records from this phone or laptop only, for example to start a second device fresh from your Google Sheet. Nothing is deleted from the Sheet or your other devices; Sync now downloads everything again. To delete a booking everywhere, open it and use Delete booking.</p><button class="btn danger" id="wipe">Clear this device</button></div>';
     return {
       title: 'Backup & restore', tab: 'more', back: '#/more', html: html, after: function () {
         $('#bk').onclick = function () {
@@ -1756,10 +1848,11 @@
           deliverFile('athulyam-queries-' + today() + '.csv', csv(rows), 'text/csv');
         };
         $('#wipe').onclick = function () {
-          var typed = prompt('This deletes every booking, payment and expense on this phone. Type DELETE to confirm.');
-          if (typed !== 'DELETE') return toast('Nothing deleted.');
-          data.bookings = []; data.payments = []; data.expenses = []; data.queries = [];
-          save().then(function () { toast('All records deleted from this phone'); render(); });
+          var typed = prompt('This clears every booking, payment, expense and query from THIS device only. Your Google Sheet and other devices keep them, and the next sync downloads them again. Type CLEAR to confirm.');
+          if (typed !== 'CLEAR') return toast('Nothing cleared.');
+          resetting = true;
+          data.bookings = []; data.payments = []; data.expenses = []; data.queries = []; data.deleted = {};
+          save(true).then(function () { resetting = false; data.settings.settingsAt = ''; knownSettings = settingsFp(data.settings); toast('This device is cleared. Tap Sync now to download your records.'); render(); });
         };
       }
     };
@@ -1775,9 +1868,15 @@
   routes.settings = function () {
     var s = S();
     var html = '<form id="sf" novalidate>' +
-      '<div class="card"><h3>Business (shown on bills)</h3>' + field('Business name', '<input name="businessName" value="' + esc(s.businessName) + '">') +
+      '<div class="card"><h3>Business letterhead (confirmations and invoices)</h3>' +
+      '<div class="logorow"><img id="logoimg" src="' + esc(s.logo || A.DEFAULT_LOGO) + '" alt="Logo"><div><input type="file" id="logofile" accept="image/*" hidden><button type="button" class="btn sm" id="logopick">' + (s.logo ? 'Change logo' : 'Upload your logo') + '</button>' + (s.logo ? '<button type="button" class="btn sm" id="logoclear">Use default</button>' : '') + '<p class="small">Square PNG or JPG works best. Shown on PDFs and the guest feedback page.</p></div></div>' +
+      field('Business name', '<input name="businessName" value="' + esc(s.businessName) + '">') + field('Legal name on GST certificate (if different)', '<input name="legalName" value="' + esc(s.legalName || '') + '" placeholder="Optional">') +
       field('Address', '<textarea name="address" rows="2">' + esc(s.address) + '</textarea>') + '<div class="two">' + field('Phone', '<input name="phone" value="' + esc(s.phone) + '">') + field('Email', '<input name="email" type="email" value="' + esc(s.email) + '">') + '</div>' +
-      field('GSTIN', '<input name="gstin" value="' + esc(s.gstin) + '" placeholder="FILL IN: your 15-character GSTIN" autocapitalize="characters">') + field('Bill footer', '<input name="billFooter" value="' + esc(s.billFooter) + '">') + '</div>' +
+      '<div class="two">' + field('Website', '<input name="website" value="' + esc(s.website || '') + '">') + field('GSTIN', '<input name="gstin" value="' + esc(s.gstin) + '" placeholder="FILL IN: your 15-character GSTIN" autocapitalize="characters">') + '</div>' +
+      '<div class="two">' + field('Check-in time', '<input name="checkInTime" value="' + esc(s.checkInTime || '') + '">') + field('Check-out time', '<input name="checkOutTime" value="' + esc(s.checkOutTime || '') + '">') + '</div>' +
+      '<div class="three">' + field('Invoice prefix', '<input name="invoicePrefix" value="' + esc(s.invoicePrefix || 'INV') + '" maxlength="5" autocapitalize="characters">') + field('First invoice no. this FY', '<input name="invoiceStart" type="number" min="1" value="' + esc(s.invoiceStart || 1) + '">') + field('SAC for other charges', '<input name="sacOther" value="' + esc(s.sacOther || '') + '" placeholder="Optional">') + '</div>' +
+      '<p class="small">Invoices are numbered INV/26-27/001, INV/26-27/002… and restart every 1 April. Rooms use SAC 996311 and food 996331; check the SAC for other charges with your CA.</p>' +
+      field('Footer line', '<input name="billFooter" value="' + esc(s.billFooter) + '">') + '</div>' +
       '<div class="card"><h3>GST</h3><label class="chk"><input type="checkbox" name="gstOn"' + (s.gstOn ? ' checked' : '') + '> Charge GST on new bookings by default</label>' +
       '<div class="two">' + field('Room GST % (≤ threshold)', '<input name="gstRoomLow" type="number" step="any" value="' + s.gstRoomLow + '">') + field('Room GST % (above)', '<input name="gstRoomHigh" type="number" step="any" value="' + s.gstRoomHigh + '">') + '</div>' +
       '<div class="three">' + field('Threshold ₹/night', '<input name="gstThreshold" type="number" step="any" value="' + s.gstThreshold + '">') + field('Food GST %', '<input name="gstFood" type="number" step="any" value="' + s.gstFood + '">') + field('Other GST %', '<input name="gstOther" type="number" step="any" value="' + s.gstOther + '">') + '</div>' +
@@ -1803,7 +1902,7 @@
       '<label class="chk"><input type="radio" name="idMode" value="last4"' + (s.idMode !== 'full' ? ' checked' : '') + '> Last 4 characters only</label>' +
       '<label class="chk"><input type="checkbox" name="uploadDocs"' + (s.uploadDocs !== false ? ' checked' : '') + '> Copy ID photos and documents to Google Drive at each sync</label>' +
       field('Keep photos on this phone after check-out (days)', '<input name="keepPhotosDays" type="number" min="1" value="' + esc(s.keepPhotosDays || 30) + '">', '', 'Only removed from the phone once they are safely in Drive.') +
-      field('Booking number prefix', '<input name="bookingPrefix" value="' + esc(s.bookingPrefix || 'ATH') + '" maxlength="6" autocapitalize="characters">', '', 'Booking numbers look like ATH-0001. Changing it affects new bookings only.') +
+      field('Booking number prefix', '<input name="bookingPrefix" value="' + esc(s.bookingPrefix || 'ATH') + '" maxlength="6" autocapitalize="characters">', '', 'Booking numbers look like ATH-068 and restart at 001 every 1 April. Changing it affects new bookings only.') +
       '<p class="small">ID numbers, photos, passports and visas are personal data. They are kept on this phone (protected by your phone lock and the app PIN) and in your own Google Drive. Share the Drive folder with nobody else.</p></div>' +
       '<div class="card"><h3>Backups</h3>' + field('Warn me if no backup or sync for (days)', '<input name="backupDays" type="number" min="1" value="' + s.backupDays + '">') + '</div>' +
       '<button class="btn primary big" type="submit">Save settings</button></form>' +
@@ -1827,13 +1926,20 @@
             if (el.dataset.room) { se.rates = se.rates || {}; se.rates[el.dataset.room] = r2(el.value); } else se[el.dataset.k] = el.value;
           });
         }
+        $('#logopick').onclick = function () { $('#logofile').click(); };
+        $('#logofile').onchange = function () {
+          var file = this.files && this.files[0]; if (!file) return;
+          makeLogo(file).then(function (url) { s.logo = url; return save(); }).then(function () { toast('Logo saved. It reaches the Sheet at the next sync.'); render(); }).catch(function (e) { toast('Could not read that image: ' + e.message, true); });
+        };
+        var lc = $('#logoclear'); if (lc) lc.onclick = function () { s.logo = ''; save().then(render); };
         $('#addroom').onclick = function () { collectRooms(); s.rooms.push({ id: uid(), name: 'Room ' + (s.rooms.length + 1), tariff: 0, active: true, clean: true }); save(); render(); };
         $('#addseason').onclick = function () { collectRooms(); s.seasons.push({ id: uid(), name: 'Peak season', from: '', to: '', rates: {} }); save(); render(); };
         $$('[data-dels]').forEach(function (b) { b.onclick = function () { collectRooms(); s.seasons.splice(+b.dataset.dels, 1); save(); render(); }; });
         f.onsubmit = function (ev) {
           ev.preventDefault();
           collectRooms();
-          ['businessName', 'address', 'phone', 'email', 'gstin', 'billFooter'].forEach(function (k) { s[k] = f.elements[k].value.trim(); });
+          ['businessName', 'legalName', 'address', 'phone', 'email', 'gstin', 'billFooter', 'website', 'checkInTime', 'checkOutTime', 'sacOther'].forEach(function (k) { s[k] = f.elements[k].value.trim(); });
+          s.invoicePrefix = (f.elements.invoicePrefix.value || 'INV').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5) || 'INV'; s.invoiceStart = Math.max(1, Math.round(num(f.elements.invoiceStart.value)) || 1);
           s.gstin = s.gstin.toUpperCase();
           if (s.gstin && !/^[0-9]{2}[A-Z0-9]{13}$/.test(s.gstin)) return toast('GSTIN should be 15 characters starting with 2 digits.', true);
           s.gstOn = f.elements.gstOn.checked;
@@ -1915,21 +2021,94 @@
     if (!navigator.onLine) { if (manual) toast('You are offline. Data is safe on the phone; sync later.', true); return; }
     if (syncing) return; syncing = true;
     var body = JSON.stringify({ token: s.syncToken, action: 'sync', sentAt: nowISO(), appVersion: APP_VERSION,
-      data: { settings: Object.assign({}, s, { pinHash: '', pinSalt: '', syncToken: '' }), bookings: data.bookings, payments: data.payments, expenses: data.expenses, queries: data.queries } });
+      data: { settings: Object.assign({}, s, { pinHash: '', pinSalt: '', syncToken: '' }), bookings: data.bookings, payments: data.payments, expenses: data.expenses, queries: data.queries, deleted: data.deleted || {} } });
     fetch(s.syncUrl, { method: 'POST', body: body, redirect: 'follow' })
       .then(function (r) { return r.text(); })
       .then(function (t) {
         var j; try { j = JSON.parse(t); } catch (e) { throw new Error('Unexpected reply from Google. Check the web app is deployed with access “Anyone”.'); }
         if (!j.ok) throw new Error(j.error || 'Sync rejected');
         data.meta.lastSync = nowISO(); data.meta.lastSyncError = '';
+        if (j.data) applyServer(j.data);
         Object.keys(j.folders || {}).forEach(function (id) { var bk = booking(id); if (bk) bk.driveUrl = j.folders[id]; });
-        return save(true).then(function () { if (manual) toast('Synced to Google Sheet'); return uploadDocs(manual); });
+        return save(true).then(function () {
+          /* records were replaced by the merged copy: redraw so buttons act on the fresh records (not while a form is open) */
+          if (j.data && !/^#\/(new|edit|gx|pay|qnew|qedit|settings|importbk|import|formc)/.test(location.hash)) render();
+          if (manual) toast('Synced to Google Sheet'); return uploadDocs(manual);
+        });
       })
       .catch(function (e) {
         data.meta.lastSyncError = e.message || String(e); save(true);
         if (manual) toast('Sync failed: ' + data.meta.lastSyncError, true);
       })
       .then(function () { syncing = false; var sm = $('#smsg'); if (sm) sm.innerHTML = syncStatusHtml(); });
+  }
+  /* Bring in what other devices (and the Sheet) changed. Newest change of each record wins; device-only settings stay. */
+  function applyServer(remote) {
+    trackChanges();
+    var localDocs = {};
+    data.bookings.forEach(function (b) { A.guestsOf(b).forEach(function (g) { (g.docs || []).forEach(function (d) { localDocs[d.id] = d.local; }); }); });
+    var m = A.syncMerge(data, remote), mine = data.settings;
+    A.COLLS.forEach(function (k) { data[k] = m[k]; });
+    data.deleted = m.deleted;
+    if (m.settings !== mine) {
+      var ns = JSON.parse(JSON.stringify(m.settings));
+      DEVICE_KEYS.forEach(function (k) { if (k !== 'settingsAt') ns[k] = mine[k]; });
+      var def = defaultSettings(); Object.keys(def).forEach(function (k) { if (ns[k] === undefined) ns[k] = def[k]; });
+      data.settings = ns;
+    }
+    data.bookings.forEach(function (b) { A.guestsOf(b).forEach(function (g) { (g.docs || []).forEach(function (d) { d.local = localDocs[d.id] === undefined ? false : localDocs[d.id]; }); }); });
+    trackInit();
+    data.meta.lastMergeStats = m.stats;
+  }
+  /* Confirmation / invoice PDF from the Sheet, then the share menu (WhatsApp) with the file attached. */
+  function sendDoc(b, kind, btn) {
+    var s = S();
+    if (!s.syncUrl || !s.syncToken) return toast('Set up Cloud sync first (More → Settings).', true);
+    if (!navigator.onLine) return toast('You are offline. Try again with internet.', true);
+    var label = btn.textContent; btn.disabled = true; btn.textContent = 'Preparing PDF…';
+    function done() { btn.disabled = false; btn.textContent = label; }
+    waitSync().then(function () {
+      return fetch(s.syncUrl, { method: 'POST', redirect: 'follow', body: JSON.stringify({ token: s.syncToken, action: 'doc', bookingId: b.id, kind: kind }) }).then(function (r) { return r.text(); });
+    }).then(function (t) {
+      var j; try { j = JSON.parse(t); } catch (e) { throw new Error('Unexpected reply from Google. Update Code.gs to version 1.5 and deploy a new version.'); }
+      if (!j.ok) throw new Error(j.error || 'Could not make the PDF');
+      if (j.invoiceNo && !b.invoiceNo) { b.invoiceNo = j.invoiceNo; b.invoiceDate = j.invoiceDate; trackInit(); save(true); }
+      var bytes = Uint8Array.from(atob(j.pdf), function (ch) { return ch.charCodeAt(0); });
+      var blob = new Blob([bytes], { type: 'application/pdf' }), name = j.name || (kind + '.pdf');
+      var first = firstName(b.guestName), B = A.biz(s);
+      var text = kind === 'invoice'
+        ? 'Namaste ' + first + ', thank you for staying at ' + B.name + '. Please find your tax invoice ' + (j.invoiceNo || '') + ' attached. We hope to welcome you again!'
+        : 'Namaste ' + first + ', your booking at ' + B.name + ' is confirmed. Booking reference ' + (b.no || '') + '. Check-in from ' + B.checkInTime + ', check-out by ' + B.checkOutTime + '. Your confirmation is attached. Call or WhatsApp ' + B.phone + ' for anything you need.';
+      var file = null; try { file = new File([blob], name, { type: 'application/pdf' }); } catch (e) { file = null; }
+      if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
+        return navigator.share({ files: [file], text: text, title: name }).then(function () {
+          b[kind === 'invoice' ? 'invoiceSentAt' : 'confirmationSentAt'] = nowISO(); save(); toast('Shared');
+        }).catch(function (e) { if (e && e.name !== 'AbortError') throw e; });
+      }
+      var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+      if (b.phone) window.open(waLink(b.phone, text + (j.page ? '\n\n' + j.page : '')), '_blank');
+      b[kind === 'invoice' ? 'invoiceSentAt' : 'confirmationSentAt'] = nowISO(); save();
+      toast('PDF downloaded. WhatsApp opened: attach the PDF from Downloads, or send the link in the message.');
+    }).catch(function (e) { toast(e.message || String(e), true); }).then(done);
+  }
+  function waitSync() {
+    syncNow(false);
+    return new Promise(function (res) { var n = 0; (function wait() { if (!syncing || n++ > 120) return res(); setTimeout(wait, 250); })(); });
+  }
+  /* Shrink an uploaded logo to a small square-ish image kept inside Settings. */
+  function makeLogo(file) {
+    return new Promise(function (res, rej) {
+      var url = URL.createObjectURL(file), img = new Image();
+      img.onload = function () {
+        var max = 240, sc = Math.min(1, max / Math.max(img.width, img.height)), w = Math.round(img.width * sc), hh = Math.round(img.height * sc);
+        var cv = document.createElement('canvas'); cv.width = w; cv.height = hh; var cx = cv.getContext('2d');
+        cx.fillStyle = '#ffffff'; cx.fillRect(0, 0, w, hh); cx.drawImage(img, 0, 0, w, hh); URL.revokeObjectURL(url);
+        var png = cv.toDataURL('image/png'), jpg = cv.toDataURL('image/jpeg', 0.85);
+        res(png.length < 90000 ? png : jpg);
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); rej(new Error('not an image')); };
+      img.src = url;
+    });
   }
   /* Send ID photos and documents to the booking's Drive folder, one at a time, then tidy old copies on the phone. */
   function toB64(blob) { return new Promise(function (res, rej) { var r = new FileReader(); r.onload = function () { res(String(r.result).split(',')[1] || ''); }; r.onerror = function () { rej(r.error); }; r.readAsDataURL(blob); }); }
@@ -1984,5 +2163,5 @@
   load().then(function () { netBadge(); render(); }).catch(function (e) {
     $('#main').innerHTML = '<div class="warn">This browser blocked local storage (' + esc(e.message) + '). On iPhone, open the app from the Home Screen icon, and make sure Private Browsing is off.</div>';
   });
-  window.AHApp = { _data: function () { return data; }, _save: function () { return save(true); }, go: go };
+  window.AHApp = { _data: function () { return data; }, _save: function () { return save(true); }, _sync: function () { return waitSync(); }, go: go };
 })();
