@@ -75,6 +75,7 @@ var AH = (function () {
 
   /* The single source of truth for one booking's money. */
   function calc(b, payments) {
+    if (b && b.charges) b = applyCharges(Object.assign({}, b));
     var pays = paymentsFor(b, payments);
     var paid = sum(pays.filter(function (p) { return p.type !== 'refund'; }), function (p) { return p.amount; });
     var refunded = sum(pays.filter(function (p) { return p.type === 'refund'; }), function (p) { return p.amount; });
@@ -371,7 +372,7 @@ var AH = (function () {
   function docsMissing(b) { if (b.imported) return 0; return guestsOf(b).filter(function (g) { return g.type !== 'Child' && !(g.docs || []).length; }).length; }
 
   /* ---------- Booking numbers and Drive folder path ---------- */
-  function bookingNo(n, prefix) { return String(prefix || 'ATH').toUpperCase().replace(/[^A-Z0-9]/g, '') + '-' + String(n).padStart(3, '0'); }
+  function bookingNo(n, prefix) { return String(prefix || 'ATH').toUpperCase().replace(/[^A-Z0-9]/g, '') + '-' + String(n).padStart(6, '0'); }
   /* Give a number to any booking without one (numbers restart each financial year). The Sheet settles duplicates between devices. */
   function assignBookingNumbers(data) {
     var done = 0;
@@ -409,7 +410,17 @@ var AH = (function () {
     var e = {};
     if (!String(b.guestName || '').trim()) e.guestName = 'Enter the guest name.';
     var digits = String(b.phone || '').replace(/\D/g, '');
-    if (b.phone && (digits.length < 10 || digits.length > 15)) e.phone = 'Phone number should have 10–15 digits.';
+    if (!digits && !b.imported) e.phone = 'Enter the mobile number.';
+    else if (b.phone && (digits.length < 10 || digits.length > 15)) e.phone = 'Phone number should have 10–15 digits.';
+    if (!b.source) e.source = 'Choose the booking source.';
+    if (!b.status) e.status = 'Choose the status.';
+    if (!b.nationality) e.nationality = 'Choose the nationality.';
+    if (b.nationality === 'Foreign' && !String(b.country || '').trim()) e.country = 'Enter the country.';
+    if (!b.imported && !String(b.idType || '').trim()) e.idType = 'Choose the ID type.';
+    if (!b.imported && !String(b.idValue || '').trim()) e.idValue = 'Enter the ID number' + (b.nationality === 'Foreign' ? ' (passport number).' : '.');
+    if (b.status !== 'Cancelled' && roomsOf(b).some(function (r) { return r.charge === '' || r.charge == null || !(Number(r.charge) > 0); })) e.room = 'Enter the charge for every room.';
+    (b.charges || []).forEach(function (c, i) { if (!String(c.name || '').trim() || !(Number(c.amount) > 0)) e['charge' + i] = 'Charge line ' + (i + 1) + ': enter what it is for and an amount above ₹0 (or remove the line).'; });
+    var cm = validateCustom(b, settings); if (cm.length) e.custom = 'Fill in: ' + cm.join(', ') + '.';
     if (b.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(b.email).trim())) e.email = 'Check the email address.';
     var rids = roomIds(b);
     if (!rids.length) e.roomId = 'Choose a room.';
@@ -828,53 +839,90 @@ var AH = (function () {
   };
   function fyKey(d) { var y = Number(String(d).slice(0, 4)), m = Number(String(d).slice(5, 7)); var s = m >= 4 ? y : y - 1; return s + '-' + String((s + 1) % 100).padStart(2, '0'); }
   function noSeq(no) { var m = String(no || '').match(/-(\d+)$/); return m ? Number(m[1]) : 0; }
-  /* Old 4-digit style (ATH-0001) from versions 1.4 and earlier. */
-  function isLegacyNo(no) { return /-0\d{3}$/.test(String(no || '')) || !/-\d{3,}$/.test(String(no || '')); }
+  /* Numbers from before version 1.6 (ATH-0001, ATH-068) are replaced once by the continuous 6-digit series. */
+  function isLegacyNo(no) { return !/-\d{6}$/.test(String(no || '')); }
   function bookingFy(b) { return fyKey(isDate(b.checkIn) ? b.checkIn : String(b.createdAt || '').slice(0, 10)); }
-  /* Next free number in the booking's financial year (numbers restart every 1 April). */
+  /* One continuous series that never restarts: ATH-000001, ATH-000002 … so the number tells you how many bookings so far. */
   function nextBookingNo(data, checkIn, prefix, counters) {
-    var fy = fyKey(checkIn), max = num((counters || {})[fy]);
-    (data.bookings || []).forEach(function (b) { if (b.no && !isLegacyNo(b.no) && bookingFy(b) === fy) max = Math.max(max, noSeq(b.no)); });
+    var max = num((counters || {}).all);
+    (data.bookings || []).forEach(function (b) { if (b.no && !isLegacyNo(b.no)) max = Math.max(max, noSeq(b.no)); });
     return bookingNo(max + 1, prefix);
   }
-  /* The Sheet's referee: every booking gets a unique number within its financial year.
-     Old-style or duplicate numbers are replaced (the older booking keeps its number). counters = { '2026-27': last used } */
+  /* The Sheet's referee: every booking gets a unique number. Old-style or duplicate numbers are replaced:
+     the earlier-made booking keeps its number; bookings without a valid number are numbered in arrival order. */
   function numberBookings(data, prefix, counters) {
     counters = counters || {};
-    var used = {}, changed = [];
-    var list = (data.bookings || []).slice().sort(function (a, b) {
+    var used = {}, changed = [], need = [];
+    var byMade = (data.bookings || []).slice().sort(function (a, b) {
       var x = String(a.createdAt || a.checkIn || ''), y = String(b.createdAt || b.checkIn || '');
       return x < y ? -1 : x > y ? 1 : (a.id < b.id ? -1 : 1);
     });
-    list.forEach(function (b) {
-      var fy = bookingFy(b); used[fy] = used[fy] || {};
-      if (b.no && !isLegacyNo(b.no) && !used[fy][noSeq(b.no)]) { used[fy][noSeq(b.no)] = 1; counters[fy] = Math.max(num(counters[fy]), noSeq(b.no)); }
+    byMade.forEach(function (b) {
+      var q = noSeq(b.no);
+      if (b.no && !isLegacyNo(b.no) && !used[q]) { used[q] = 1; counters.all = Math.max(num(counters.all), q); }
+      else need.push(b);
     });
-    list.forEach(function (b) {
-      var fy = bookingFy(b), s = noSeq(b.no);
-      if (b.no && !isLegacyNo(b.no) && used[fy][s] === 1) { used[fy][s] = 2; return; }
-      counters[fy] = num(counters[fy]) + 1;
-      var oldNo = b.no; b.no = bookingNo(counters[fy], prefix); used[fy][counters[fy]] = 2;
+    need.sort(function (a, b) { return String(a.checkIn) < String(b.checkIn) ? -1 : String(a.checkIn) > String(b.checkIn) ? 1 : (String(a.createdAt) < String(b.createdAt) ? -1 : 1); });
+    need.forEach(function (b) {
+      counters.all = num(counters.all) + 1;
+      var oldNo = b.no; b.no = bookingNo(counters.all, prefix);
       changed.push({ id: b.id, from: oldNo || '', to: b.no });
     });
     return changed;
   }
-  /* Invoice numbers: INV/26-27/001 — consecutive within each financial year (GST rule 46: up to 16 characters). */
-  function invoiceNo(seq, fy, prefix) { return String(prefix || 'INV').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5) + '/' + fy.slice(2) + '/' + String(seq).padStart(3, '0'); }
-  function needsInvoice(b) { return b.status === 'Checked Out' && !b.imported && !b.invoiceNo; }
+  /* Invoices: INV-000001, INV-000002 … one continuous series, given at check-out (GST rule 46: up to 16 characters, unique). */
+  function invoiceNo(seq, fy, prefix) { return String(prefix || 'INV').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5) + '-' + String(seq).padStart(6, '0'); }
+  function needsInvoice(b) { return b.status === 'Checked Out' && !b.imported && !/-\d{6}$/.test(String(b.invoiceNo || '')); }
   function assignInvoices(data, counters, start, prefix) {
     counters = counters || {}; var out = [];
     (data.bookings || []).forEach(function (b) {
-      var m = String(b.invoiceNo || '').match(/\/(\d{2}-\d{2})\/(\d+)$/);
-      if (m) { var k = '20' + m[1]; counters[k] = Math.max(num(counters[k]), Number(m[2])); }
+      var m = String(b.invoiceNo || '').match(/-(\d{6})$/);
+      if (m) counters.all = Math.max(num(counters.all), Number(m[1]));
     });
-    (data.bookings || []).filter(needsInvoice).sort(function (a, b) { return a.checkOut < b.checkOut ? -1 : a.checkOut > b.checkOut ? 1 : (a.id < b.id ? -1 : 1); }).forEach(function (b) {
-      var date = isDate(b.checkedOutOn) ? b.checkedOutOn : b.checkOut, fy = fyKey(date);
-      counters[fy] = Math.max(num(counters[fy]), num(start || 1) - 1) + 1;
-      b.invoiceNo = invoiceNo(counters[fy], fy, prefix); b.invoiceDate = date;
+    (data.bookings || []).filter(needsInvoice).sort(function (a, b) {
+      var x = a.checkedOutAt || a.checkOut, y = b.checkedOutAt || b.checkOut; return x < y ? -1 : x > y ? 1 : (a.id < b.id ? -1 : 1);
+    }).forEach(function (b) {
+      var date = isDate(b.checkedOutOn) ? b.checkedOutOn : b.checkOut;
+      counters.all = Math.max(num(counters.all), num(start || 1) - 1) + 1;
+      b.invoiceNo = invoiceNo(counters.all, '', prefix); b.invoiceDate = date;
       out.push(b.id);
     });
     return out;
+  }
+  /* Itemised extra charges: lines of { type: 'Food' | 'Other', name, amount }. Totals feed the food / additional amounts. */
+  function chargeLines(b) {
+    if (b.charges && b.charges.length) return b.charges;
+    var out = [];
+    if (num(b.food)) out.push({ type: 'Food', name: 'Food & beverages', amount: num(b.food) });
+    if (num(b.additional)) out.push({ type: 'Other', name: b.additionalNote || 'Other services', amount: num(b.additional) });
+    return out;
+  }
+  function applyCharges(b) {
+    if (!b.charges) return b;
+    b.food = r2(sum(b.charges.filter(function (c) { return c.type === 'Food'; }), function (c) { return c.amount; }));
+    b.additional = r2(sum(b.charges.filter(function (c) { return c.type !== 'Food'; }), function (c) { return c.amount; }));
+    b.additionalNote = b.charges.filter(function (c) { return c.type !== 'Food'; }).map(function (c) { return c.name; }).filter(Boolean).join(', ');
+    return b;
+  }
+  /* Required fields. Optional: email, notes, special requests, food/extras/discount/commission, company billing,
+     children's ID, address of guests other than the main guest. Old-sheet stays are not forced to have IDs. */
+  function validateGuest(g, isMain, imported) {
+    var e = [], F = g.nationality === 'Foreign', child = g.type === 'Child';
+    function need(k, label) { if (!String(g[k] || '').trim()) e.push(label); }
+    need('name', 'Full name'); need('gender', 'Gender');
+    if (isMain) { need('phone', 'Mobile'); if (String(g.phone || '').replace(/\D/g, '').length < 10 && String(g.phone || '').trim()) e.push('Mobile (10+ digits)'); }
+    if (F) {
+      need('dob', 'Date of birth'); need('surname', 'Surname'); need('givenName', 'Given name'); need('country', 'Nationality (country)'); need('passportNo', 'Passport number');
+      need('passportPlace', 'Passport place of issue'); need('passportIssue', 'Passport issue date'); need('passportExpiry', 'Passport expiry');
+      need('visaNo', 'Visa number'); need('visaType', 'Visa type'); need('visaExpiry', 'Visa valid till');
+      need('homeAddress', 'Address in home country'); need('arrivedFrom', 'Arrived from'); need('arrivalIndia', 'Date of arrival in India'); need('nextPlace', 'Next destination');
+    } else if (!child && !imported) {
+      need('idType', 'ID type'); need('idNumber', 'ID number'); if (isMain) need('address', 'Address');
+    }
+    return e;
+  }
+  function validateCustom(b, settings) {
+    return ((settings || {}).customFields || []).filter(function (cf) { return cf.required && cf.label && !String(((b.custom || {})[cf.id]) || '').trim(); }).map(function (cf) { return cf.label; });
   }
 
   /* ---------- Two-way sync: merge two copies of the data, newest change of each record wins ---------- */
@@ -976,8 +1024,7 @@ var AH = (function () {
         kv('Nights', h(c.nights)) + kv('Room' + (roomsOf(b).length > 1 ? 's' : ''), h(roomsTxt)) + kv('Booked via', h(b.source)) + (b.specialRequests ? kv('Special requests', h(b.specialRequests)) : '') + '</table>';
       out += '<h3>Charges</h3><table class="grid">' +
         (c.roomParts || []).map(function (p) { return '<tr><td>Room — ' + h(roomNameIn(st, p.roomId)) + ' (' + c.nights + ' night' + (c.nights === 1 ? '' : 's') + ')</td><td class="r">' + inr(p.charge, true) + '</td></tr>'; }).join('') +
-        (c.food ? '<tr><td>Food &amp; beverages</td><td class="r">' + inr(c.food, true) + '</td></tr>' : '') +
-        (c.additional ? '<tr><td>' + h(b.additionalNote || 'Other services') + '</td><td class="r">' + inr(c.additional, true) + '</td></tr>' : '') +
+        chargeLines(b).map(function (x) { return '<tr><td>' + h(x.name || (x.type === 'Food' ? 'Food & beverages' : 'Other services')) + '</td><td class="r">' + inr(x.amount, true) + '</td></tr>'; }).join('') +
         (c.discount ? '<tr><td>Less: discount</td><td class="r">−' + inr(c.discount, true) + '</td></tr>' : '') +
         (c.coupon ? '<tr><td>Less: coupon ' + h(c.couponLabel) + '</td><td class="r">−' + inr(c.coupon, true) + '</td></tr>' : '') +
         (c.cancelFee ? '<tr><td>Cancellation charge</td><td class="r">' + inr(c.cancelFee, true) + '</td></tr>' : '') +
@@ -996,8 +1043,16 @@ var AH = (function () {
         '<td style="padding:0"><h3 style="margin-top:0">Stay</h3>Check-in: ' + h(fmtLong(b.checkIn)) + '<br>Check-out: ' + h(fmtLong(b.checkOut)) + '<br>Nights: ' + c.nights + '<br>Room' + (roomsOf(b).length > 1 ? 's' : '') + ': ' + h(roomsTxt) + '</td></tr></table>';
       var rows = [], sh = c.taxable ? 1 : 0;
       (c.roomParts || []).forEach(function (p) { rows.push(['Room accommodation — ' + roomNameIn(st, p.roomId), B.sacRoom, c.nights || 1, p.taxable, p.rate, p.gst]); });
-      if (c.foodTaxable) rows.push(['Food & beverages', B.sacFood, 1, c.foodTaxable, num(b.gstFoodRate), c.gstFood]);
-      if (c.otherTaxable) rows.push([b.additionalNote || 'Other services', B.sacOther, 1, c.otherTaxable, num(b.gstOtherRate), c.gstOther]);
+      /* each charge line gets its share of the food / other taxable value and GST */
+      ['Food', 'Other'].forEach(function (t) {
+        var ls = chargeLines(b).filter(function (x) { return (x.type === 'Food') === (t === 'Food'); }), tot = sum(ls, function (x) { return x.amount; });
+        var tx = t === 'Food' ? c.foodTaxable : c.otherTaxable, gt = t === 'Food' ? c.gstFood : c.gstOther, givenT = 0, givenG = 0;
+        ls.forEach(function (x, i) {
+          var last = i === ls.length - 1, a = last ? r2(tx - givenT) : r2(tx * num(x.amount) / (tot || 1)), g = last ? r2(gt - givenG) : r2(gt * num(x.amount) / (tot || 1));
+          givenT = r2(givenT + a); givenG = r2(givenG + g);
+          if (a || g) rows.push([x.name || (t === 'Food' ? 'Food & beverages' : 'Other services'), t === 'Food' ? B.sacFood : B.sacOther, 1, a, num(t === 'Food' ? b.gstFoodRate : b.gstOtherRate), g]);
+        });
+      });
       out += '<h3>Details</h3><table class="grid"><tr><th>#</th><th>Description</th><th>SAC</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Taxable value</th><th class="r">CGST</th><th class="r">SGST</th><th class="r">Amount</th></tr>' +
         rows.map(function (x, i) {
           var g = b.gstOn ? num(x[5]) : 0, c1 = r2(g / 2), s1 = r2(g - c1), half = num(x[4]) / 2;
@@ -1092,7 +1147,7 @@ var AH = (function () {
     formCPending: formCPending, merge: merge, validateBooking: validateBooking, autoRoomGstRate: autoRoomGstRate,
     rateCardTotal: rateCardTotal, activeRooms: activeRooms, paymentsFor: paymentsFor, inr: inr,
     DEFAULT_LOGO: DEFAULT_LOGO, BUSINESS_DEFAULTS: BUSINESS_DEFAULTS, fyKey: fyKey, isLegacyNo: isLegacyNo, nextBookingNo: nextBookingNo, numberBookings: numberBookings, invoiceNo: invoiceNo, needsInvoice: needsInvoice, assignInvoices: assignInvoices,
-    syncMerge: syncMerge, docHtml: docHtml, amountInWords: amountInWords, biz: biz, fmtLong: fmtLong, maskId: maskId, importOld: importOld, oldRoomRate: oldRoomRate, COLLS: COLLS
+    syncMerge: syncMerge, chargeLines: chargeLines, applyCharges: applyCharges, validateGuest: validateGuest, validateCustom: validateCustom, docHtml: docHtml, amountInWords: amountInWords, biz: biz, fmtLong: fmtLong, maskId: maskId, importOld: importOld, oldRoomRate: oldRoomRate, COLLS: COLLS
   };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = AH;

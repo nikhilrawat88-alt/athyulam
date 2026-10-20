@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var A = AH, inr = A.inr, num = A.num, r2 = A.r2;
-  var APP_VERSION = '1.5.0';
+  var APP_VERSION = '1.6.0';
 
   /* ---------- tiny helpers ---------- */
   function $(s, el) { return (el || document).querySelector(s); }
@@ -107,7 +107,7 @@
       backupDays: 7,
       pinHash: '', pinSalt: '', lockMinutes: 5,
       syncUrl: '', syncToken: '', autoSync: true,
-      tokenAmount: 500, upiId: '', autoReviewEmail: true, couponPrefix: 'ATH', bookingPrefix: 'ATH', keepPhotosDays: 30, uploadDocs: true,
+      tokenAmount: 500, upiId: '', autoReviewEmail: false, customFields: [], couponPrefix: 'ATH', bookingPrefix: 'ATH', keepPhotosDays: 30, uploadDocs: true,
       reviewLinks: {
         google: 'https://share.google/sGf4Yhq7SHDDbqd9y',
         'Booking.com': 'https://www.booking.com/hotel/in/athulyam-homes.html',
@@ -137,6 +137,7 @@
         if (!st.phone) st.phone = D.phone; if (!st.gstin) st.gstin = D.gstin; if (!st.website) st.website = D.website;
         moved++;
       }
+      if (!data.meta.v16) { data.meta.v16 = nowISO(); data.settings.autoReviewEmail = false; data.settings.customFields = data.settings.customFields || []; moved++; }
       data.deleted = data.deleted || {};
       trackInit();
       if (moved) return idbPut(JSON.parse(JSON.stringify(data)));
@@ -265,6 +266,7 @@
       return r.map(function (v) { var s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(',');
     }).join('\r\n');
   }
+  function smsNo(phone) { var d = String(phone || '').replace(/\D/g, ''); return d.length === 10 ? '+91' + d : (d ? '+' + d : ''); }
   function waLink(phone, text) {
     var d = String(phone || '').replace(/\D/g, '');
     if (d.length === 10) d = '91' + d;
@@ -361,7 +363,7 @@
       id: '', guestName: '', phone: '', email: '', nationality: 'Indian', country: '', formCFiled: false,
       idType: s.idTypes[0], idValue: '', adults: 2, children: 0, roomId: room, rooms: [{ roomId: room, charge: '' }],
       checkIn: today(), checkOut: A.addDays(today(), 1), source: 'Direct Booking', status: 'Confirmed',
-      room: '', food: '', additional: '', additionalNote: '', discount: '', commission: '',
+      room: '', food: '', additional: '', additionalNote: '', charges: [], custom: {}, discount: '', commission: '', gender: '', address: '',
       gstOn: !!s.gstOn, gstRoomRate: s.gstRoomLow, gstFoodRate: s.gstFood, gstOtherRate: s.gstOther, gstRateManual: false,
       couponType: '', couponValue: '', couponCode: '', specialRequests: '', notes: '', cancelFee: '', cancelCommission: '', payoutReceived: '', payoutDate: '', payoutRef: ''
     };
@@ -394,6 +396,8 @@
     if (!b) return { title: 'Not found', html: empty('This booking no longer exists.'), back: '#/bookings' };
     var copy = JSON.parse(JSON.stringify(b));
     copy.rooms = A.roomsOf(copy).map(function (r) { return { roomId: r.roomId, charge: r.charge, gstRate: r.gstRate }; });
+    copy.charges = A.chargeLines(copy).map(function (x) { return { type: x.type, name: x.name, amount: x.amount }; }); copy.custom = copy.custom || {};
+    var mg = A.guestsOf(copy).filter(function (g) { return g.primary; })[0] || A.guestsOf(copy)[0] || {}; copy.gender = copy.gender || mg.gender || ''; copy.address = copy.address || mg.address || '';
     formState = { b: copy, errors: {}, isNew: false };
     return bookingForm('Edit booking');
   };
@@ -405,12 +409,14 @@
       '<form id="bf" novalidate>' +
       '<div class="card"><h3>Guest</h3>' +
       field('Full name *', '<input name="guestName" value="' + esc(b.guestName) + '" autocomplete="off" required>', e.guestName) +
-      field('Mobile number', '<input name="phone" type="tel" inputmode="tel" value="' + esc(b.phone) + '" placeholder="98XXXXXXXX">', e.phone, 'Used for WhatsApp messages. Indian numbers get +91 automatically.') +
+      field('Mobile number *', '<input name="phone" type="tel" inputmode="tel" value="' + esc(b.phone) + '" placeholder="98XXXXXXXX">', e.phone, 'Used for WhatsApp messages. Indian numbers get +91 automatically.') +
       field('Email', '<input name="email" type="email" inputmode="email" value="' + esc(b.email) + '" placeholder="For the review request email (optional)">', e.email) +
-      '<div class="two">' + field('Nationality', '<select name="nationality">' + options(['Indian', 'Foreign'], b.nationality) + '</select>') +
-      field('Country', '<input name="country" value="' + esc(b.country) + '" placeholder="If foreign">') + '</div>' +
-      '<div class="two">' + field('ID type', '<select name="idType">' + options(s.idTypes, b.idType) + '</select>') +
-      field('ID number', '<input name="idValue" value="' + esc(b.idValue) + '" ' + (s.idMode === 'full' ? '' : 'maxlength="4"') + ' autocomplete="off">', e.idValue, idHint) + '</div>' +
+      '<div class="two">' + field('Nationality *', '<select name="nationality">' + options(['Indian', 'Foreign'], b.nationality) + '</select>', e.nationality) +
+      field('Country' + (b.nationality === 'Foreign' ? ' *' : ''), '<input name="country" value="' + esc(b.country) + '" placeholder="If foreign">', e.country) + '</div>' +
+      '<div class="two">' + field('Gender *', '<select name="gender">' + options(['', 'Male', 'Female', 'Other'], b.gender || '', function (x) { return x || 'Choose'; }) + '</select>', e.gender) +
+      field('Address (city, state) *', '<input name="address" value="' + esc(b.address || '') + '">', e.address) + '</div>' +
+      '<div class="two">' + field('ID type *', '<select name="idType">' + options(s.idTypes, b.idType) + '</select>', e.idType) +
+      field('ID number *', '<input name="idValue" value="' + esc(b.idValue) + '" ' + (s.idMode === 'full' ? '' : 'maxlength="4"') + ' autocomplete="off">', e.idValue, idHint) + '</div>' +
       '<p class="small">This is the main guest. Add everyone else, their ID photos, passports and visas on the booking page after saving (Guests & IDs).</p>' +
       '<div class="two">' + field('Adults *', '<input name="adults" type="number" inputmode="numeric" min="1" value="' + esc(b.adults) + '">', e.adults) +
       field('Children', '<input name="children" type="number" inputmode="numeric" min="0" value="' + esc(b.children) + '">', e.children) + '</div></div>' +
@@ -421,15 +427,15 @@
       '<div class="two">' + field('Check-in *', '<input name="checkIn" type="date" value="' + esc(b.checkIn) + '">', e.checkIn) +
       field('Check-out *', '<input name="checkOut" type="date" value="' + esc(b.checkOut) + '">', e.checkOut) + '</div>' +
       '<div class="nights" id="nights"></div>' +
-      '<div class="two">' + field('Booking source', '<select name="source">' + options(s.sources, b.source) + '</select>') +
-      field('Status', '<select name="status">' + options(A.STATUSES.concat(A.STATUSES.indexOf(b.status) < 0 ? [b.status] : []), b.status) + '</select>') + '</div>' +
+      '<div class="two">' + field('Booking source *', '<select name="source">' + options(s.sources, b.source) + '</select>') +
+      field('Status *', '<select name="status">' + options(A.STATUSES.concat(A.STATUSES.indexOf(b.status) < 0 ? [b.status] : []), b.status) + '</select>') + '</div>' +
       '<div id="overlap"></div></div>' +
 
       '<div class="card"><h3>Charges (₹)</h3>' +
       '<div class="two">' + field('Room charges (total)', '<input name="roomTotalView" readonly tabindex="-1" value="">', e.room, 'Sum of the room charges above.') +
-      field('Food (whole booking)', '<input name="food" type="number" inputmode="decimal" min="0" step="any" value="' + esc(b.food) + '">', e.food, 'One amount for the booking, not per person.') + '</div>' +
-      '<div class="two">' + field('Additional charges', '<input name="additional" type="number" inputmode="decimal" min="0" step="any" value="' + esc(b.additional) + '">', e.additional) +
-      field('What for?', '<input name="additionalNote" value="' + esc(b.additionalNote) + '" placeholder="Bonfire, taxi…">') + '</div>' +
+      '<span></span></div>' +
+      '<div class="fld"><span>Food & extra charges <small style="display:inline">— one line each, whole booking</small></span><div id="chargesBox"></div></div>' +
+      '<div class="actions"><button type="button" class="btn sm" id="addCharge">＋ Add charge</button></div>' +
       '<div class="two">' + field('Discount', '<input name="discount" type="number" inputmode="decimal" min="0" step="any" value="' + esc(b.discount) + '">', e.discount) +
       field('Platform commission', '<input name="commission" type="number" inputmode="decimal" min="0" step="any" value="' + esc(b.commission) + '">', e.commission, 'Your expense. Never added to or taken off the guest bill.') + '</div>' +
       couponFields(b, e) +
@@ -443,12 +449,12 @@
       field('Commission on fee', '<input name="cancelCommission" type="number" inputmode="decimal" min="0" step="any" value="' + esc(b.cancelCommission) + '">', e.cancelCommission) + '</div></div>' +
       '<div class="calcbox" id="calcbox"></div></div>' +
 
-      (formState.isNew ? '<div class="card"><h3>Advance received now (optional)</h3><div class="two">' +
-        field('Amount ₹', '<input name="advAmount" type="number" inputmode="decimal" min="0" step="any">') +
-        field('Method', '<select name="advMethod">' + options(A.METHODS, 'UPI') + '</select>') + '</div>' +
-        field('Transaction reference', '<input name="advRef" placeholder="UPI ref / last digits (optional)">') + '</div>' : '') +
+      (formState.isNew ? '<div class="card"><h3>Payments received now</h3><div id="paysBox"></div><div class="actions"><button type="button" class="btn sm" id="addPay">＋ Add payment</button></div><p class="small">Add one line per payment, e.g. advance by UPI and balance in cash. Leave empty if nothing is paid yet. Later payments: Record payment on the booking page.</p></div>' : '') +
+      ((s.customFields || []).filter(function (x) { return x.label; }).length ? '<div class="card"><h3>More details</h3>' + s.customFields.filter(function (x) { return x.label; }).map(function (cf) {
+        return field(esc(cf.label) + (cf.required ? ' *' : ''), '<input data-cf="' + esc(cf.id) + '" value="' + esc((b.custom || {})[cf.id] || '') + '">');
+      }).join('') + (e.custom ? '<em class="err">' + esc(e.custom) + '</em>' : '') + '</div>' : '') +
 
-      '<div class="card"><h3>Notes</h3>' +
+      '<div class="card"><h3>Notes (optional)</h3>' +
       field('Special requests', '<textarea name="specialRequests" rows="2">' + esc(b.specialRequests) + '</textarea>') +
       '<details class="fld"><summary>Bill to a company (optional, for GST invoice)</summary><div class="two">' + field('Company name', '<input name="billTo" value="' + esc(b.billTo || '') + '">') + field('Company GSTIN', '<input name="billGstin" value="' + esc(b.billGstin || '') + '" autocapitalize="characters" maxlength="15">') + '</div></details>' +
       field('Internal notes (not on bill)', '<textarea name="notes" rows="2">' + esc(b.notes) + '</textarea>') + '</div>' +
@@ -479,12 +485,12 @@
     if (!b.guests || !b.guests.length) A.migrateGuests(b);
     var g = b.guests.filter(function (x) { return x.primary; })[0] || b.guests[0];
     g.primary = true; g.name = b.guestName; g.phone = b.phone; g.email = b.email; g.nationality = b.nationality; g.country = b.country;
-    g.idType = b.idType; g.idNumber = b.idValue;
+    g.idType = b.idType; g.idNumber = b.idValue; if (b.gender) g.gender = b.gender; if (b.address) g.address = b.address;
   }
   function readForm() {
     var f = $('#bf'), b = formState.b;
     ['guestName', 'phone', 'email', 'nationality', 'country', 'idType', 'idValue', 'adults', 'children', 'checkIn', 'checkOut', 'source', 'status',
-      'food', 'additional', 'additionalNote', 'discount', 'commission', 'gstRoomRate', 'gstFoodRate', 'gstOtherRate', 'specialRequests', 'notes', 'cancelFee', 'cancelCommission', 'billTo', 'billGstin']
+      'discount', 'commission', 'gstRoomRate', 'gstFoodRate', 'gstOtherRate', 'specialRequests', 'notes', 'cancelFee', 'cancelCommission', 'billTo', 'billGstin', 'gender', 'address']
       .forEach(function (k) { if (f.elements[k]) b[k] = f.elements[k].value; });
     b.gstOn = f.elements.gstOn.checked;
     var lines = $$('#roomsBox .roomline', f);
@@ -493,6 +499,11 @@
       return { roomId: $('[data-rk="roomId"]', ln).value, charge: $('[data-rk="charge"]', ln).value, gstRate: old.gstRate };
     });
     b.room = A.roomTotal(b); b.roomId = (b.rooms[0] || {}).roomId || '';
+    var cl = $$('#chargesBox .chargeline', f);
+    b.charges = cl.map(function (ln) { return { type: $('[data-ck="type"]', ln).value, name: $('[data-ck="name"]', ln).value.trim(), amount: $('[data-ck="amount"]', ln).value }; });
+    A.applyCharges(b);
+    b.custom = b.custom || {}; $$('[data-cf]', f).forEach(function (el) { b.custom[el.dataset.cf] = el.value.trim(); });
+    formState.pays = $$('#paysBox .payline', f).map(function (ln) { return { amount: $('[data-pk="amount"]', ln).value, method: $('[data-pk="method"]', ln).value, date: $('[data-pk="date"]', ln).value, ref: $('[data-pk="ref"]', ln).value.trim() }; });
     readCoupon(f, b);
     b.guestName = b.guestName.trim(); b.phone = b.phone.trim(); b.email = String(b.email || '').trim();
     if (S().idMode !== 'full') b.idValue = String(b.idValue).replace(/\s/g, '').slice(-4);
@@ -513,6 +524,32 @@
       }).join('');
       $$('[data-rmroom]').forEach(function (x) { x.onclick = function () { readForm(); formState.b.rooms.splice(+x.dataset.rmroom, 1); drawRooms(); refresh('rooms'); }; });
     }
+    function drawCharges() {
+      var b = formState.b;
+      $('#chargesBox').innerHTML = (b.charges || []).map(function (c, i) {
+        return '<div class="chargeline"><select data-ck="type" aria-label="Type">' + options([{ id: 'Food', name: 'Food' }, { id: 'Other', name: 'Other' }], c.type || 'Food') + '</select>' +
+          '<input data-ck="name" value="' + esc(c.name || '') + '" placeholder="' + (c.type === 'Other' ? 'Bonfire, pick-up…' : 'Breakfast, dinner…') + '" aria-label="What for">' +
+          '<input data-ck="amount" type="number" inputmode="decimal" min="0" step="any" value="' + esc(c.amount) + '" placeholder="₹" aria-label="Amount">' +
+          '<button type="button" class="x" data-rmcharge="' + i + '" aria-label="Remove line">−</button></div>';
+      }).join('') || '<p class="small">No food or extra charges.</p>';
+      $$('[data-rmcharge]').forEach(function (x) { x.onclick = function () { readForm(); formState.b.charges.splice(+x.dataset.rmcharge, 1); drawCharges(); refresh('charges'); }; });
+    }
+    $('#addCharge').onclick = function () { readForm(); formState.b.charges.push({ type: 'Food', name: '', amount: '' }); drawCharges(); var ls = $$('#chargesBox [data-ck="name"]'); if (ls.length) ls[ls.length - 1].focus(); };
+    drawCharges();
+    function drawPays() {
+      var box = $('#paysBox'); if (!box) return;
+      formState.pays = formState.pays || [];
+      box.innerHTML = formState.pays.map(function (p, i) {
+        return '<div class="payline"><input data-pk="amount" type="number" inputmode="decimal" min="0" step="any" value="' + esc(p.amount) + '" placeholder="₹ amount" aria-label="Amount">' +
+          '<select data-pk="method" aria-label="Method">' + options(A.METHODS.filter(function (m) { return m !== 'Not recorded'; }), p.method || 'UPI') + '</select>' +
+          '<input data-pk="date" type="date" value="' + esc(p.date || today()) + '" aria-label="Date">' +
+          '<input data-pk="ref" value="' + esc(p.ref || '') + '" placeholder="UPI / card ref" aria-label="Reference">' +
+          '<button type="button" class="x" data-rmpay="' + i + '" aria-label="Remove payment">−</button></div>';
+      }).join('');
+      $$('[data-rmpay]').forEach(function (x) { x.onclick = function () { readForm(); formState.pays.splice(+x.dataset.rmpay, 1); drawPays(); }; });
+    }
+    var ap = $('#addPay'); if (ap) ap.onclick = function () { readForm(); formState.pays.push({ amount: '', method: 'UPI', date: today(), ref: '' }); drawPays(); };
+    drawPays();
     function freeIds(b) { return A.activeRooms(S()).map(function (r) { return r.id; }).filter(function (id) { return A.roomIds(b).indexOf(id) < 0; }); }
     $('#addRoom').onclick = function () {
       var b = readForm(), free = freeIds(b);
@@ -554,12 +591,18 @@
         row('Total bill', inr(c.total), 'strong') +
         row('Commission (your expense)', inr(c.commission), 'muted') + row('Net after commission (excl. GST)', inr(c.net), 'muted');
       var ov = A.overlaps(data.bookings, b);
-      $('#overlap').innerHTML = ov.length && b.status !== 'Cancelled' ? '<div class="warn"><b>Double-booking warning.</b> ' + esc(roomsLabel(b)) + ' is already taken by ' +
-        ov.map(function (o) { return esc(o.guestName) + ' (' + fmtShort(o.checkIn) + '–' + fmtShort(o.checkOut) + ', ' + esc(o.status) + ')'; }).join('; ') +
-        '.<label class="chk"><input type="checkbox" id="override"> I understand — save anyway (override)</label></div>' : '';
+      /* Only redraw the warning when its text changes: redrawing while the guest taps the box (a blur on another field
+         fires "change") destroyed the checkbox under the finger, so the tick never landed. */
+      var ovMsg = ov.length && b.status !== 'Cancelled' ? esc(roomsLabel(b)) + ' is already taken by ' + ov.map(function (o) { return esc(o.guestName) + ' (' + fmtShort(o.checkIn) + '–' + fmtShort(o.checkOut) + ', ' + esc(o.status) + ')'; }).join('; ') : '';
+      var ovBox = $('#overlap');
+      if (ovBox.dataset.msg !== ovMsg) {
+        var wasTicked = (($('#override') || {}).checked);
+        ovBox.dataset.msg = ovMsg;
+        ovBox.innerHTML = ovMsg ? '<div class="warn"><b>Double-booking warning.</b> ' + ovMsg + '.<label class="chk ovr"><input type="checkbox" id="override"' + (wasTicked ? ' checked' : '') + '> I understand — save anyway (override)</label></div>' : '';
+      }
     }
-    f.addEventListener('input', function (ev) { refresh(ev.target.name); });
-    f.addEventListener('change', function (ev) { refresh(ev.target.name); });
+    f.addEventListener('input', function (ev) { if (ev.target.id !== 'override') refresh(ev.target.name); });
+    f.addEventListener('change', function (ev) { if (ev.target.id !== 'override') refresh(ev.target.name); });
     $('#ratecard').onclick = function () {
       var b = readForm(), missing = [];
       b.rooms.forEach(function (r) { var v = A.rateCardTotal(S(), r.roomId, b.checkIn, b.checkOut); if (v) r.charge = v; else missing.push(roomName(r.roomId)); });
@@ -570,6 +613,12 @@
     f.onsubmit = function (ev) {
       ev.preventDefault();
       var b = readForm(), errs = A.validateBooking(b, S());
+      if (!b.imported && !b.gender) errs.gender = 'Choose the gender.';
+      if (!b.imported && b.nationality !== 'Foreign' && !String(b.address || '').trim()) errs.address = 'Enter the address (city, state).';
+      (formState.pays || []).forEach(function (p, i) {
+        if (!(num(p.amount) > 0) || !A.isDate(p.date)) errs['pay' + i] = 'Payment ' + (i + 1) + ': enter the amount and date (or remove the line).';
+        else if (['UPI', 'Card', 'Bank Transfer'].indexOf(p.method) >= 0 && !p.ref) errs['pay' + i] = 'Payment ' + (i + 1) + ': enter the ' + p.method + ' reference.';
+      });
       var ov = A.overlaps(data.bookings, b);
       if (ov.length && b.status !== 'Cancelled' && !(($('#override') || {}).checked) && A.isActive(b)) errs.override = 'Room already booked for these dates. Tick the override box to save anyway.';
       formState.errors = errs;
@@ -586,6 +635,7 @@
         return;
       }
       ['adults', 'children'].forEach(function (k) { b[k] = Math.round(num(b[k])); });
+      (b.charges || []).forEach(function (c) { c.amount = r2(c.amount); }); A.applyCharges(b);
       ['room', 'food', 'additional', 'discount', 'commission', 'gstRoomRate', 'gstFoodRate', 'gstOtherRate', 'cancelFee', 'cancelCommission'].forEach(function (k) { b[k] = r2(b[k]); });
       if (b.couponType) b.couponValue = r2(b.couponValue);
       b.updatedAt = nowISO();
@@ -598,8 +648,7 @@
         b.id = uid(); b.createdAt = nowISO(); b.fbToken = token(); data.bookings.push(b);
         b.no = A.nextBookingNo(data, b.checkIn, S().bookingPrefix);
         if (b.queryId) { var lq = query(b.queryId); if (lq) { lq.status = 'Closed'; lq.outcome = 'Booked'; lq.bookingId = b.id; lq.closedAt = lq.closedAt || nowISO(); lq.updatedAt = nowISO(); } }
-        var adv = num(f.elements.advAmount.value);
-        if (adv > 0) data.payments.push({ id: uid(), bookingId: b.id, type: 'payment', amount: r2(adv), date: today(), method: f.elements.advMethod.value, ref: f.elements.advRef.value.trim(), createdAt: nowISO(), updatedAt: nowISO() });
+        (formState.pays || []).forEach(function (p) { data.payments.push({ id: uid(), bookingId: b.id, type: 'payment', amount: r2(p.amount), date: p.date, method: p.method, ref: p.ref, createdAt: nowISO(), updatedAt: nowISO() }); });
       } else {
         var i = data.bookings.findIndex(function (x) { return x.id === b.id; });
         data.bookings[i] = b;
@@ -692,8 +741,12 @@
       ' Send opens your share menu with the PDF attached: choose WhatsApp, then the guest. Needs internet and Sheet sync.</p></div>' +
       (b.specialRequests || b.notes ? '<div class="card"><h3>Notes</h3>' + (b.specialRequests ? '<p><b>Requests:</b> ' + esc(b.specialRequests) + '</p>' : '') + (b.notes ? '<p><b>Internal:</b> ' + esc(b.notes) + '</p>' : '') + '</div>' : '') +
       (b.status === 'Checked Out' ? '<div class="card"><h3>Review & feedback</h3>' +
+        '<div class="actions">' + (b.phone ? '<a class="btn wa primary" data-msg="review" target="_blank" rel="noopener" href="' + waLink(b.phone, reviewText(b)) + '">Send review request on WhatsApp</a>' +
+          '<a class="btn" data-msg="review" href="sms:' + esc(smsNo(b.phone)) + (/iPhone|iPad/.test(navigator.userAgent) ? '&' : '?') + 'body=' + encodeURIComponent(reviewText(b)) + '">Not on WhatsApp? Send SMS</a>' : '') +
+          (b.email ? '<a class="btn" data-msg="review" href="mailto:' + esc(b.email) + '?subject=' + encodeURIComponent('Thank you for staying at ' + S().businessName) + '&body=' + encodeURIComponent(reviewText(b)) + '">Send by email</a>' : '') + '</div>' +
+        '<p class="small">' + (b.source === 'Direct Booking' || !A.reviewLinks(S(), b.source).channel ? 'Direct booking: the message has your Google review link and the feedback form.' : 'The message has the ' + esc(b.source) + ' review link, your Google review link and the feedback form.') + '</p>' +
         row('WhatsApp review request', b.reviewWaAt ? 'Opened ' + fmtDate(b.reviewWaAt.slice(0, 10)) : 'Not sent yet') +
-        row('Email review request', !b.email ? 'No guest email' : (!S().syncUrl ? 'Needs Sheet sync set up' : (S().autoReviewEmail === false ? 'Turned off in Settings' : 'Sent by your Sheet after the next sync'))) +
+        (S().autoReviewEmail ? row('Automatic email', !b.email ? 'No guest email' : 'Sent by your Sheet after the next sync') : '') +
         field('Permission to share their review on other platforms', '<select id="consent">' + options([{ id: '', name: 'Not asked yet' }, { id: 'Yes', name: 'Yes, may share' }, { id: 'No', name: 'No' }], b.reviewConsent || '') + '</select>') +
         field('Given via', '<select id="consentVia">' + options(['WhatsApp reply', 'Feedback form', 'In person', 'Email'], b.consentVia || 'WhatsApp reply') + '</select>') +
         '<p class="small">Feedback-form answers fill this in on the Sheet automatically. Record WhatsApp "YES" replies here.</p></div>' : '') +
@@ -812,8 +865,9 @@
     var html = '<div class="card"><b>' + esc(b.guestName) + '</b> · ' + esc(b.no || '') + ' · ' + fmtShort(b.checkIn) + ' → ' + fmtShort(b.checkOut) + '</div>' +
       '<form id="gf" class="card" novalidate><h3>' + (isNew ? 'Add guest' : 'Guest') + (g.primary ? ' <span class="tag2">main guest</span>' : '') + '</h3>' +
       inp('name', 'Full name (as on ID) *', '', g.primary ? 'Changes here also update the booking.' : '', ' autocomplete="off"') +
-      '<div class="three">' + field('Adult / child', '<select name="type">' + options(['Adult', 'Child'], g.type) + '</select>') + field('Gender', '<select name="gender">' + options(['', 'Male', 'Female', 'Other'], g.gender || '', function (x) { return x || '—'; }) + '</select>') + inp('dob', 'Date of birth', 'date') + '</div>' +
-      '<div class="two">' + field('Nationality', '<select name="nationality">' + options(['Indian', 'Foreign'], g.nationality) + '</select>') + inp('phone', 'Mobile', 'tel') + '</div>' +
+      '<div class="three">' + field('Adult / child', '<select name="type">' + options(['Adult', 'Child'], g.type) + '</select>') + field('Gender *', '<select name="gender">' + options(['', 'Male', 'Female', 'Other'], g.gender || '', function (x) { return x || 'Choose'; }) + '</select>') + inp('dob', 'Date of birth', 'date') + '</div>' +
+      '<div class="two">' + field('Nationality', '<select name="nationality">' + options(['Indian', 'Foreign'], g.nationality) + '</select>') + inp('phone', 'Mobile' + (g.primary ? ' *' : ''), 'tel') + '</div>' +
+      '<div class="fld"><span>Other contact numbers</span><div id="xph"></div><button type="button" class="btn sm" id="addph">＋ Add number</button></div>' +
       '<div id="indBox" class="' + (F ? 'hide' : '') + '"><div class="two">' + field('ID type', '<select name="idType">' + options(s.idTypes, g.idType) + '</select>') + inp('idNumber', 'ID number (full)', '', '', ' autocomplete="off" autocapitalize="characters"') + '</div>' +
       inp('address', 'Address / city, state') + '</div>' +
       '<div id="forBox" class="' + (F ? '' : 'hide') + '"><h3 style="margin-top:6px">Passport & visa (for Form C)</h3>' +
@@ -849,9 +903,19 @@
           var fo = this.value === 'Foreign'; $('#forBox').classList.toggle('hide', !fo); $('#indBox').classList.toggle('hide', fo);
           if (!liveDocs(g).length) $('#dkind').value = fo ? 'Passport' : 'ID front';
         };
-        function commit() {
-          readG();
+        function drawPh() {
+          g.phones = g.phones || [];
+          $('#xph').innerHTML = g.phones.map(function (p, i) { return '<div class="roomline"><input data-xph="' + i + '" type="tel" inputmode="tel" value="' + esc(p.number || '') + '" placeholder="Number"><input data-xphl="' + i + '" value="' + esc(p.label || '') + '" placeholder="Whose? e.g. driver"><button type="button" class="x" data-rmph="' + i + '" aria-label="Remove number">−</button></div>'; }).join('');
+          $$('[data-rmph]').forEach(function (x) { x.onclick = function () { readPh(); g.phones.splice(+x.dataset.rmph, 1); drawPh(); }; });
+        }
+        function readPh() { g.phones = $$('[data-xph]').map(function (el) { return { number: el.value.trim(), label: $('[data-xphl="' + el.dataset.xph + '"]').value.trim() }; }); }
+        $('#addph').onclick = function () { readPh(); g.phones.push({ number: '', label: '' }); drawPh(); };
+        drawPh();
+        function commit(strict) {
+          readG(); readPh(); g.phones = g.phones.filter(function (p) { return p.number; });
           if (!g.name) { $('#gerr').innerHTML = '<div class="warn">Enter the guest’s name first.</div>'; f.elements.name.focus(); return false; }
+          var miss = strict ? A.validateGuest(g, !!g.primary, !!b.imported) : [];
+          if (miss.length) { $('#gerr').innerHTML = '<div class="warn">Please fill in: ' + esc(miss.join(', ')) + '.</div>'; $('#gerr').scrollIntoView({ block: 'center' }); return false; }
           if (g.passportExpiry && g.passportIssue && g.passportExpiry < g.passportIssue) { $('#gerr').innerHTML = '<div class="warn">Passport expiry is before its issue date.</div>'; return false; }
           if (!b.guests || !b.guests.length) A.migrateGuests(b);
           var i = b.guests.findIndex(function (x) { return x.id === g.id; });
@@ -861,7 +925,7 @@
           b.updatedAt = nowISO(); gForm.gid = g.id;
           return true;
         }
-        f.onsubmit = function (ev) { ev.preventDefault(); if (!commit()) return; save().then(function () { toast('Guest saved'); gForm = null; location.replace('#/guest/' + b.id); }); };
+        f.onsubmit = function (ev) { ev.preventDefault(); if (!commit(true)) return; save().then(function () { toast('Guest saved'); gForm = null; location.replace('#/guest/' + b.id); }); };
         var del = $('#gdel');
         if (del) del.onclick = function () {
           if (!confirm('Remove ' + (g.name || 'this guest') + ' and their documents from this booking? Copies already in Google Drive stay there.')) return;
@@ -1001,7 +1065,7 @@
       field('Amount ₹ *', '<input name="amount" type="number" inputmode="decimal" min="0" step="any" value="' + (suggested ? suggested : '') + '" required>') +
       '<div class="two">' + field('Date *', '<input name="date" type="date" value="' + today() + '">') +
       field('Method', '<select name="method">' + options(A.METHODS, refund ? 'UPI' : (b.source !== 'Direct Booking' && !c.received ? 'Online Platform' : 'UPI')) + '</select>') + '</div>' +
-      field('Transaction reference', '<input name="ref" placeholder="Optional">') +
+      field('Transaction reference', '<input name="ref" placeholder="Needed for UPI, card and bank transfer">') +
       '<div id="perr"></div><button class="btn primary big" type="submit">Save ' + (refund ? 'refund' : 'payment') + '</button></form>';
     return {
       title: refund ? 'Record refund' : 'Record payment', html: html, back: '#/guest/' + b.id, tab: 'bookings', after: function () {
@@ -1010,6 +1074,7 @@
           var f = this, amt = r2(f.elements.amount.value), d = f.elements.date.value;
           if (!(amt > 0)) return ($('#perr').innerHTML = '<div class="warn">Enter an amount greater than ₹0.</div>');
           if (!A.isDate(d)) return ($('#perr').innerHTML = '<div class="warn">Choose a date.</div>');
+          if (['UPI', 'Card', 'Bank Transfer'].indexOf(f.elements.method.value) >= 0 && !f.elements.ref.value.trim()) return ($('#perr').innerHTML = '<div class="warn">Enter the ' + esc(f.elements.method.value) + ' transaction reference.</div>');
           if (!refund && amt > c.outstanding + 0.005 && !confirm('This is more than the balance of ' + inr(c.outstanding) + '. Save anyway?')) return;
           data.payments.push({ id: uid(), bookingId: b.id, type: refund ? 'refund' : 'payment', amount: amt, date: d, method: f.elements.method.value, ref: f.elements.ref.value.trim(), createdAt: nowISO(), updatedAt: nowISO() });
           b.updatedAt = nowISO();
@@ -1057,7 +1122,7 @@
     var s = S();
     var html = '<form id="qf" class="card" novalidate><h3>' + (isNew ? 'New query' : 'Edit query') + '</h3>' +
       field('Guest name *', '<input name="name" value="' + esc(q.name) + '" autocomplete="off">') +
-      '<div class="two">' + field('Mobile', '<input name="phone" type="tel" inputmode="tel" value="' + esc(q.phone) + '">') + field('Email', '<input name="email" type="email" value="' + esc(q.email) + '">') + '</div>' +
+      '<div class="two">' + field('Mobile *', '<input name="phone" type="tel" inputmode="tel" value="' + esc(q.phone) + '">') + field('Email', '<input name="email" type="email" value="' + esc(q.email) + '">') + '</div>' +
       '<div class="two">' + field('Channel', '<select name="channel">' + options(s.sources, q.channel) + '</select>') + field('Received on', '<input name="date" type="date" value="' + esc(q.date) + '">') + '</div>' +
       '<div class="two">' + field('Check-in (if given)', '<input name="checkIn" type="date" value="' + esc(q.checkIn) + '">') + field('Check-out', '<input name="checkOut" type="date" value="' + esc(q.checkOut) + '">') + '</div>' +
       '<div class="three">' + field('Adults', '<input name="adults" type="number" inputmode="numeric" min="1" value="' + esc(q.adults) + '">') + field('Children', '<input name="children" type="number" inputmode="numeric" min="0" value="' + esc(q.children) + '">') +
@@ -1078,7 +1143,7 @@
           ['name', 'phone', 'email', 'channel', 'date', 'checkIn', 'checkOut', 'roomId', 'message', 'notes', 'status', 'outcome', 'lostReason'].forEach(function (k) { q[k] = String(f.elements[k].value || '').trim(); });
           q.adults = Math.max(1, Math.round(num(f.elements.adults.value) || 1)); q.children = Math.max(0, Math.round(num(f.elements.children.value)));
           q.quote = r2(f.elements.quote.value);
-          var err = !q.name ? 'Enter the guest name.' : (q.checkIn && q.checkOut && A.nights(q.checkIn, q.checkOut) < 1 ? 'Check-out must be after check-in.' : (q.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(q.email) ? 'Check the email address.' : ''));
+          var err = !q.name ? 'Enter the guest name.' : String(q.phone).replace(/\D/g, '').length < 10 ? 'Enter the mobile number (10+ digits).' : (q.checkIn && q.checkOut && A.nights(q.checkIn, q.checkOut) < 1 ? 'Check-out must be after check-in.' : (q.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(q.email) ? 'Check the email address.' : ''));
           if (err) { $('#qerr').innerHTML = '<div class="warn">' + esc(err) + '</div>'; return; }
           if (q.status !== 'Closed') q.outcome = '';
           if (q.status === 'Answered' && !q.answeredAt) q.answeredAt = nowISO();
@@ -1693,7 +1758,7 @@
     }
     var j = oldImp.file, past = j.bookings.filter(function (b) { return b.past; }).length;
     var html = '<div class="card"><h3>' + j.bookings.length + ' bookings found</h3><p class="small">' + past + ' past stays and ' + (j.bookings.length - past) + ' upcoming. Last numbers: ' +
-      Object.keys(j.lastNumbers || {}).map(function (k) { return 'FY ' + esc(k) + ' → ATH-' + String(j.lastNumbers[k]).padStart(3, '0'); }).join(', ') + '. New bookings continue from the next number.</p>' +
+      'numbered ATH-000001 to ' + A.bookingNo(j.lastNo || j.bookings.length, s.bookingPrefix) + ' in arrival order. New bookings continue from the next number.</p>' +
       '<p class="small">Amounts include GST, as in your sheet; the app works out the GST inside them (rooms 12% before 22 Sep 2025, 5% after; food 5%) so every total stays the same.</p></div>' +
       '<div class="card"><h3>Step 2 — match the old room types to your rooms</h3>' + Object.keys(oldImp.map).map(function (type, ti) {
         var m = oldImp.map[type];
@@ -1874,8 +1939,8 @@
       field('Address', '<textarea name="address" rows="2">' + esc(s.address) + '</textarea>') + '<div class="two">' + field('Phone', '<input name="phone" value="' + esc(s.phone) + '">') + field('Email', '<input name="email" type="email" value="' + esc(s.email) + '">') + '</div>' +
       '<div class="two">' + field('Website', '<input name="website" value="' + esc(s.website || '') + '">') + field('GSTIN', '<input name="gstin" value="' + esc(s.gstin) + '" placeholder="FILL IN: your 15-character GSTIN" autocapitalize="characters">') + '</div>' +
       '<div class="two">' + field('Check-in time', '<input name="checkInTime" value="' + esc(s.checkInTime || '') + '">') + field('Check-out time', '<input name="checkOutTime" value="' + esc(s.checkOutTime || '') + '">') + '</div>' +
-      '<div class="three">' + field('Invoice prefix', '<input name="invoicePrefix" value="' + esc(s.invoicePrefix || 'INV') + '" maxlength="5" autocapitalize="characters">') + field('First invoice no. this FY', '<input name="invoiceStart" type="number" min="1" value="' + esc(s.invoiceStart || 1) + '">') + field('SAC for other charges', '<input name="sacOther" value="' + esc(s.sacOther || '') + '" placeholder="Optional">') + '</div>' +
-      '<p class="small">Invoices are numbered INV/26-27/001, INV/26-27/002… and restart every 1 April. Rooms use SAC 996311 and food 996331; check the SAC for other charges with your CA.</p>' +
+      '<div class="three">' + field('Invoice prefix', '<input name="invoicePrefix" value="' + esc(s.invoicePrefix || 'INV') + '" maxlength="5" autocapitalize="characters">') + field('First invoice number', '<input name="invoiceStart" type="number" min="1" value="' + esc(s.invoiceStart || 1) + '">') + field('SAC for other charges', '<input name="sacOther" value="' + esc(s.sacOther || '') + '" placeholder="Optional">') + '</div>' +
+      '<p class="small">Invoices are numbered INV-000001, INV-000002… in one continuous series, given at check-out. Rooms use SAC 996311 and food 996331; check the SAC for other charges with your CA.</p>' +
       field('Footer line', '<input name="billFooter" value="' + esc(s.billFooter) + '">') + '</div>' +
       '<div class="card"><h3>GST</h3><label class="chk"><input type="checkbox" name="gstOn"' + (s.gstOn ? ' checked' : '') + '> Charge GST on new bookings by default</label>' +
       '<div class="two">' + field('Room GST % (≤ threshold)', '<input name="gstRoomLow" type="number" step="any" value="' + s.gstRoomLow + '">') + field('Room GST % (above)', '<input name="gstRoomHigh" type="number" step="any" value="' + s.gstRoomHigh + '">') + '</div>' +
@@ -1895,14 +1960,17 @@
       s.sources.filter(function (x) { return x !== 'Direct Booking' && x !== 'Other' && x !== 'Travel Agent' && x !== 'Google'; }).map(function (src) {
         return field(src + ' property page', '<input data-rl="' + esc(src) + '" value="' + esc(s.reviewLinks[src] || '') + '" placeholder="Leave empty to skip">');
       }).join('') +
-      '<label class="chk"><input type="checkbox" name="autoReviewEmail"' + (s.autoReviewEmail !== false ? ' checked' : '') + '> Email the review request automatically after check-out (needs guest email + Sheet sync)</label></div>' +
+      '<label class="chk"><input type="checkbox" name="autoReviewEmail"' + (s.autoReviewEmail !== false ? ' checked' : '') + '> Also email the review request automatically after check-out (off by default: you send it on WhatsApp from the booking)</label></div>' +
+      '<div class="card"><h3>Your own booking fields</h3><div id="cfs">' + (s.customFields || []).map(function (cf, i) {
+        return '<div class="roomedit"><input data-cfi="' + i + '" data-k="label" value="' + esc(cf.label) + '" placeholder="e.g. Vehicle number"><label class="chk sm"><input type="checkbox" data-cfi="' + i + '" data-k="required"' + (cf.required ? ' checked' : '') + '> Required</label><button type="button" class="x" data-rmcf="' + i + '" aria-label="Remove field">−</button></div>';
+      }).join('') + '</div><button type="button" class="btn sm" id="addcf">＋ Add field</button><p class="small">Shown on every booking form under More details, on the guest register PDF and in the Bookings tab.</p></div>' +
       '<div class="card"><h3>Lists</h3>' + field('Booking sources (one per line)', '<textarea name="sources" rows="5">' + esc(s.sources.join('\n')) + '</textarea>') +
       field('Expense categories (one per line)', '<textarea name="expenseCats" rows="5">' + esc(s.expenseCats.join('\n')) + '</textarea>') + '</div>' +
       '<div class="card"><h3>Guest IDs & documents</h3><label class="chk"><input type="radio" name="idMode" value="full"' + (s.idMode === 'full' ? ' checked' : '') + '> Full ID numbers</label>' +
       '<label class="chk"><input type="radio" name="idMode" value="last4"' + (s.idMode !== 'full' ? ' checked' : '') + '> Last 4 characters only</label>' +
       '<label class="chk"><input type="checkbox" name="uploadDocs"' + (s.uploadDocs !== false ? ' checked' : '') + '> Copy ID photos and documents to Google Drive at each sync</label>' +
       field('Keep photos on this phone after check-out (days)', '<input name="keepPhotosDays" type="number" min="1" value="' + esc(s.keepPhotosDays || 30) + '">', '', 'Only removed from the phone once they are safely in Drive.') +
-      field('Booking number prefix', '<input name="bookingPrefix" value="' + esc(s.bookingPrefix || 'ATH') + '" maxlength="6" autocapitalize="characters">', '', 'Booking numbers look like ATH-068 and restart at 001 every 1 April. Changing it affects new bookings only.') +
+      field('Booking number prefix', '<input name="bookingPrefix" value="' + esc(s.bookingPrefix || 'ATH') + '" maxlength="6" autocapitalize="characters">', '', 'Booking numbers look like ATH-000256 and keep counting up (they never restart). Changing it affects new bookings only.') +
       '<p class="small">ID numbers, photos, passports and visas are personal data. They are kept on this phone (protected by your phone lock and the app PIN) and in your own Google Drive. Share the Drive folder with nobody else.</p></div>' +
       '<div class="card"><h3>Backups</h3>' + field('Warn me if no backup or sync for (days)', '<input name="backupDays" type="number" min="1" value="' + s.backupDays + '">') + '</div>' +
       '<button class="btn primary big" type="submit">Save settings</button></form>' +
@@ -1932,12 +2000,15 @@
           makeLogo(file).then(function (url) { s.logo = url; return save(); }).then(function () { toast('Logo saved. It reaches the Sheet at the next sync.'); render(); }).catch(function (e) { toast('Could not read that image: ' + e.message, true); });
         };
         var lc = $('#logoclear'); if (lc) lc.onclick = function () { s.logo = ''; save().then(render); };
+        function collectCf() { $$('[data-cfi]', f).forEach(function (el) { var cf = s.customFields[+el.dataset.cfi]; if (el.dataset.k === 'required') cf.required = el.checked; else cf.label = el.value.trim(); }); }
+        $('#addcf').onclick = function () { collectRooms(); s.customFields = s.customFields || []; collectCf(); s.customFields.push({ id: 'cf-' + uid().slice(0, 8), label: '', required: false }); save(); render(); };
+        $$('[data-rmcf]').forEach(function (x) { x.onclick = function () { collectRooms(); collectCf(); s.customFields.splice(+x.dataset.rmcf, 1); save(); render(); }; });
         $('#addroom').onclick = function () { collectRooms(); s.rooms.push({ id: uid(), name: 'Room ' + (s.rooms.length + 1), tariff: 0, active: true, clean: true }); save(); render(); };
         $('#addseason').onclick = function () { collectRooms(); s.seasons.push({ id: uid(), name: 'Peak season', from: '', to: '', rates: {} }); save(); render(); };
         $$('[data-dels]').forEach(function (b) { b.onclick = function () { collectRooms(); s.seasons.splice(+b.dataset.dels, 1); save(); render(); }; });
         f.onsubmit = function (ev) {
           ev.preventDefault();
-          collectRooms();
+          collectRooms(); collectCf(); s.customFields = s.customFields.filter(function (cf) { return cf.label; });
           ['businessName', 'legalName', 'address', 'phone', 'email', 'gstin', 'billFooter', 'website', 'checkInTime', 'checkOutTime', 'sacOther'].forEach(function (k) { s[k] = f.elements[k].value.trim(); });
           s.invoicePrefix = (f.elements.invoicePrefix.value || 'INV').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5) || 'INV'; s.invoiceStart = Math.max(1, Math.round(num(f.elements.invoiceStart.value)) || 1);
           s.gstin = s.gstin.toUpperCase();
@@ -2006,9 +2077,10 @@
 
   /* ---------- Cloud sync (Google Sheet via Apps Script web app) ---------- */
   var syncTimer = null, syncing = false;
+  var syncAgain = false;
   function scheduleSync() {
     var s = data.settings; if (!s.autoSync || !s.syncUrl || !s.syncToken) return;
-    clearTimeout(syncTimer); syncTimer = setTimeout(function () { syncNow(false); }, 4000);
+    clearTimeout(syncTimer); syncTimer = setTimeout(function () { syncNow(false); }, 1500);
   }
   function syncStatusHtml() {
     var m = data.meta;
@@ -2019,7 +2091,7 @@
     var s = data.settings;
     if (!s.syncUrl || !s.syncToken) { if (manual) toast('Enter the web app URL and sync key first.', true); return; }
     if (!navigator.onLine) { if (manual) toast('You are offline. Data is safe on the phone; sync later.', true); return; }
-    if (syncing) return; syncing = true;
+    if (syncing) { syncAgain = true; return; } syncing = true; syncAgain = false;
     var body = JSON.stringify({ token: s.syncToken, action: 'sync', sentAt: nowISO(), appVersion: APP_VERSION,
       data: { settings: Object.assign({}, s, { pinHash: '', pinSalt: '', syncToken: '' }), bookings: data.bookings, payments: data.payments, expenses: data.expenses, queries: data.queries, deleted: data.deleted || {} } });
     fetch(s.syncUrl, { method: 'POST', body: body, redirect: 'follow' })
@@ -2040,7 +2112,7 @@
         data.meta.lastSyncError = e.message || String(e); save(true);
         if (manual) toast('Sync failed: ' + data.meta.lastSyncError, true);
       })
-      .then(function () { syncing = false; var sm = $('#smsg'); if (sm) sm.innerHTML = syncStatusHtml(); });
+      .then(function () { syncing = false; var sm = $('#smsg'); if (sm) sm.innerHTML = syncStatusHtml(); if (syncAgain) { syncAgain = false; setTimeout(function () { syncNow(false); }, 300); } });
   }
   /* Bring in what other devices (and the Sheet) changed. Newest change of each record wins; device-only settings stay. */
   function applyServer(remote) {
@@ -2151,6 +2223,13 @@
     return n ? save(true) : Promise.resolve();
   }
   window.addEventListener('online', function () { scheduleSync(); });
+  function autoPull() { var s = data && data.settings; if (s && s.autoSync && s.syncUrl && s.syncToken && !document.hidden && !locked()) syncNow(false); }
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) setTimeout(autoPull, 800); });
+  window.addEventListener('focus', function () { setTimeout(autoPull, 800); });
+  /* While the app stays open (e.g. on the laptop), check for the other device's changes every minute. */
+  setInterval(autoPull, 60000);
+  setInterval(autoPull, 120000);
+  setTimeout(autoPull, 1500);
 
   /* ---------- offline indicator + service worker ---------- */
   function netBadge() { $('#net').hidden = navigator.onLine; }
