@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var A = AH, inr = A.inr, num = A.num, r2 = A.r2;
-  var APP_VERSION = '1.6.0';
+  var APP_VERSION = '1.8.0';
 
   /* ---------- tiny helpers ---------- */
   function $(s, el) { return (el || document).querySelector(s); }
@@ -70,17 +70,17 @@
   function filePut(id, blob) { return fileOp('readwrite', function (st) { st.put(blob, id); }); }
   function fileGet(id) { return fileOp('readonly', function (st) { return st.get(id); }); }
   function fileDel(id) { return fileOp('readwrite', function (st) { st.delete(id); }); }
-  /* Shrink photos to max 1600 px, JPEG — about 200–400 KB each. PDFs are kept as they are. */
+  /* Shrink photos to max 2000 px on the long side, JPEG quality 0.85: ID text stays sharp, an iPhone photo of 3–8 MB
+     becomes about 0.4–0.9 MB. If the smaller copy is not smaller (already small), the original is kept. PDFs are kept as they are. */
   function compressImage(file) {
     if (!/^image\//.test(file.type) || /svg/.test(file.type)) return Promise.resolve({ blob: file, w: 0, h: 0 });
     return new Promise(function (res) {
       var url = URL.createObjectURL(file), img = new Image();
       img.onload = function () {
-        var max = 1600, w = img.naturalWidth, h = img.naturalHeight, k = Math.min(1, max / Math.max(w, h));
+        var max = 2000, w = img.naturalWidth, h = img.naturalHeight, k = Math.min(1, max / Math.max(w, h));
         var cv = document.createElement('canvas'); cv.width = Math.round(w * k); cv.height = Math.round(h * k);
-        cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
-        URL.revokeObjectURL(url);
-        cv.toBlob(function (bl) { res({ blob: bl && bl.size < file.size ? bl : file, w: cv.width, h: cv.height }); }, 'image/jpeg', 0.8);
+        var cx = cv.getContext('2d'); cx.imageSmoothingQuality = 'high'; cx.drawImage(img, 0, 0, cv.width, cv.height); URL.revokeObjectURL(url);
+        cv.toBlob(function (bl) { res({ blob: bl && bl.size < file.size ? bl : file, w: cv.width, h: cv.height }); }, 'image/jpeg', 0.85);
       };
       img.onerror = function () { URL.revokeObjectURL(url); res({ blob: file, w: 0, h: 0 }); };
       img.src = url;
@@ -107,6 +107,8 @@
       backupDays: 7,
       pinHash: '', pinSalt: '', lockMinutes: 5,
       syncUrl: '', syncToken: '', autoSync: true,
+      mealRates: { Breakfast: 0, Lunch: 0, Dinner: 0 }, menu: JSON.parse(JSON.stringify(A.MENU_DEFAULT)),
+      services: [{ name: 'Bonfire', rate: 0 }, { name: 'Pick-up / drop', rate: 0 }, { name: 'Sightseeing', rate: 0 }],
       tokenAmount: 500, upiId: '', autoReviewEmail: false, customFields: [], couponPrefix: 'ATH', bookingPrefix: 'ATH', keepPhotosDays: 30, uploadDocs: true,
       reviewLinks: {
         google: 'https://share.google/sGf4Yhq7SHDDbqd9y',
@@ -137,6 +139,16 @@
         if (!st.phone) st.phone = D.phone; if (!st.gstin) st.gstin = D.gstin; if (!st.website) st.website = D.website;
         moved++;
       }
+      if (!data.meta.v18) {
+        data.meta.v18 = nowISO(); var s8 = data.settings;
+        if (!s8.menu || !s8.menu.length) s8.menu = JSON.parse(JSON.stringify(A.MENU_DEFAULT));
+        var big = (s8.rooms || []).filter(function (r) { return /4\s*bhk/i.test(r.name); })[0];
+        if (big && !(big.includes || []).length) {
+          big.includes = (s8.rooms || []).filter(function (r) { return /deluxe\s*double|deluxe\s*king|family\s*suite/i.test(r.name); }).map(function (r) { return r.id; });
+        }
+        moved++;
+      }
+      if (!data.meta.v17) { data.meta.v17 = nowISO(); data.settings.mealRates = data.settings.mealRates || { Breakfast: 0, Lunch: 0, Dinner: 0 }; moved++; }
       if (!data.meta.v16) { data.meta.v16 = nowISO(); data.settings.autoReviewEmail = false; data.settings.customFields = data.settings.customFields || []; moved++; }
       data.deleted = data.deleted || {};
       trackInit();
@@ -186,7 +198,18 @@
     var m = {}; (c.roomParts || []).forEach(function (p) { if (!p.gst && !p.taxable) return; var x = m[p.rate] = m[p.rate] || { rate: p.rate, gst: 0, taxable: 0 }; x.gst = r2(x.gst + p.gst); x.taxable = r2(x.taxable + p.taxable); });
     return Object.keys(m).map(function (k) { return m[k]; }).filter(function (x) { return x.gst; });
   }
-  function roomsLabel(b) { var ids = A.roomIds(b), act = A.activeRooms(S()); if (ids.length > 1 && ids.length >= act.length && act.every(function (r) { return ids.indexOf(r.id) >= 0; })) return 'Whole property (' + ids.length + ' rooms)'; return ids.map(roomName).join(' + ') || '—'; }
+  function roomsLabel(b) { return A.roomIds(b).filter(Boolean).map(roomName).join(' + ') || 'No room yet'; }
+  function gname(x) { return String((x && (x.guestName || x.name)) || '').trim() || '(name to add)'; }
+  /* Version 1.7: nothing is required, so flag bookings that still miss the basics. */
+  function missingBits(b) {
+    if (b.imported) return [];
+    var m = [];
+    if (!String(b.guestName || '').trim()) m.push('name');
+    if (!String(b.phone || '').trim()) m.push('mobile');
+    if (!A.isDate(b.checkIn) || !A.isDate(b.checkOut)) m.push('dates');
+    if (!A.roomIds(b).filter(Boolean).length) m.push('room');
+    return m;
+  }
   function roomName(id) { var r = S().rooms.filter(function (x) { return x.id === id; })[0]; return r ? r.name : '(removed room)'; }
   function booking(id) { return data.bookings.filter(function (b) { return b.id === id; })[0]; }
   function query(id) { return (data.queries || []).filter(function (q) { return q.id === id; })[0]; }
@@ -224,11 +247,13 @@
   function bookingCard(b, opts) {
     var c = calc(b), flag = A.paymentFlags(b, c, today());
     return '<a class="card bk" href="#/guest/' + b.id + '">' +
-      '<div class="bk-top"><b>' + esc(b.guestName) + '</b><span class="st ' + statusClass(b.status) + '">' + esc(b.status) + '</span></div>' +
-      '<div class="bk-mid">' + esc(roomsLabel(b)) + ' · ' + fmtShort(b.checkIn) + ' → ' + fmtShort(b.checkOut) + ' · ' + c.nights + 'N · ' + esc(b.source) + '</div>' +
+      '<div class="bk-top"><b>' + esc(gname(b)) + '</b><span class="st ' + statusClass(b.status) + '">' + esc(b.status) + '</span></div>' +
+      '<div class="bk-mid">' + esc(roomsLabel(b)) + ' · ' + fmtShort(b.checkIn) + ' → ' + fmtShort(b.checkOut) + (A.stayLabel(b) ? ' · ' + A.stayLabel(b) : '') + ' · ' + esc(b.source) + '</div>' +
       (opts && opts.phone && b.phone ? '<div class="bk-mid">☎ ' + esc(b.phone) + '</div>' : '') +
       '<div class="bk-bot"><span>Bill ' + inr(c.total) + '</span><span>Paid ' + inr(c.received) + '</span><span class="' + (c.outstanding > 0 ? 'due' : '') + '">Due ' + inr(Math.max(c.outstanding, 0)) + '</span></div>' +
       (flag ? '<div class="flag fl-' + flag + '">' + flagLabel(flag) + '</div>' : '') +
+      (missingBits(b).length ? '<div class="flag fl-pending">Incomplete: ' + esc(missingBits(b).join(', ')) + '</div>' : '') +
+      (A.flaggedLines(b).length ? '<div class="flag fl-overdue">Food bill to check</div>' : '') +
       (A.isActive(b) && A.foreignGuests(b).some(function (g) { return !g.formCArrival; }) ? '<div class="flag fl-overdue">Form C not filed</div>' : '') +
       '</a>';
   }
@@ -351,8 +376,8 @@
       '<h2>Upcoming bookings <a class="more" href="#/future">All ›</a></h2>' +
       (fut.length ? fut.map(function (b) { return bookingCard(b); }).join('') : empty('No upcoming bookings.')) +
       '<h2>Pending payments <a class="more" href="#/pending">All ›</a></h2>' +
-      (pend.length ? pend.map(function (x) { return bookingCard(x.b); }).join('') : empty('Nothing pending. All balances are clear.'));
-    return { title: S().businessName, html: html, tab: 'home' };
+      (pend.length ? pend.map(function (x) { return bookingCard(x.b); }).join('') : empty('Nothing pending. All balances are clear.')) + syncCard();
+    return { title: S().businessName, html: html, tab: 'home', after: bindSyncCard };
   };
 
   /* ---------- BOOKING FORM (add + edit) ---------- */
@@ -361,15 +386,15 @@
     var s = S(), room = (A.activeRooms(s)[0] || {}).id || '';
     var b = {
       id: '', guestName: '', phone: '', email: '', nationality: 'Indian', country: '', formCFiled: false,
-      idType: s.idTypes[0], idValue: '', adults: 2, children: 0, roomId: room, rooms: [{ roomId: room, charge: '' }],
+      idType: s.idTypes[0], idValue: '', adults: 2, children: 0, roomId: room, rooms: [{ roomId: room, charge: '', auto: true }],
       checkIn: today(), checkOut: A.addDays(today(), 1), source: 'Direct Booking', status: 'Confirmed',
       room: '', food: '', additional: '', additionalNote: '', charges: [], custom: {}, discount: '', commission: '', gender: '', address: '',
       gstOn: !!s.gstOn, gstRoomRate: s.gstRoomLow, gstFoodRate: s.gstFood, gstOtherRate: s.gstOther, gstRateManual: false,
       couponType: '', couponValue: '', couponCode: '', specialRequests: '', notes: '', cancelFee: '', cancelCommission: '', payoutReceived: '', payoutDate: '', payoutRef: ''
     };
     Object.keys(prefill || {}).forEach(function (k) { b[k] = prefill[k]; });
-    if (prefill && !prefill.rooms) b.rooms = [{ roomId: prefill.roomId || room, charge: prefill.room || '' }];
-    b.roomId = b.rooms[0].roomId;
+    if (prefill && !prefill.rooms) b.rooms = [{ roomId: prefill.roomId || room, charge: prefill.room || '', auto: !prefill.room }];
+    b.roomId = (b.rooms[0] || {}).roomId || '';
     return b;
   }
   routes['new'] = function (arg) {
@@ -395,53 +420,58 @@
     var b = booking(id);
     if (!b) return { title: 'Not found', html: empty('This booking no longer exists.'), back: '#/bookings' };
     var copy = JSON.parse(JSON.stringify(b));
-    copy.rooms = A.roomsOf(copy).map(function (r) { return { roomId: r.roomId, charge: r.charge, gstRate: r.gstRate }; });
-    copy.charges = A.chargeLines(copy).map(function (x) { return { type: x.type, name: x.name, amount: x.amount }; }); copy.custom = copy.custom || {};
+    /* Existing amounts are kept as they are (auto only when the line was auto-priced and not changed by hand). */
+    copy.rooms = A.roomsOf(copy).map(function (r) { return { roomId: r.roomId, charge: r.charge, gstRate: r.gstRate, auto: r.auto === true }; });
+    copy.charges = A.chargeLines(copy).map(function (x) { return JSON.parse(JSON.stringify(x)); }); copy.custom = copy.custom || {};
     var mg = A.guestsOf(copy).filter(function (g) { return g.primary; })[0] || A.guestsOf(copy)[0] || {}; copy.gender = copy.gender || mg.gender || ''; copy.address = copy.address || mg.address || '';
     formState = { b: copy, errors: {}, isNew: false };
     return bookingForm('Edit booking');
   };
   function bookingForm(title) {
     var b = formState.b, e = formState.errors, s = S();
-    var rooms = s.rooms.filter(function (r) { return r.active !== false || A.roomIds(b).indexOf(r.id) >= 0; });
     var idHint = s.idMode === 'full' ? 'Full ID number is stored.' : 'Only the last 4 characters are kept, e.g. 4821.';
     var html = (b.queryId ? '<div class="ok">Converted from a query. The guest details are filled in — add the room, dates and charges, then save.</div>' : '') +
       '<form id="bf" novalidate>' +
+      '<p class="small">Every field is optional. Fill in what you have now and the rest later; the booking shows “Incomplete” until name, mobile, dates and room are in.</p>' +
       '<div class="card"><h3>Guest</h3>' +
-      field('Full name *', '<input name="guestName" value="' + esc(b.guestName) + '" autocomplete="off" required>', e.guestName) +
-      field('Mobile number *', '<input name="phone" type="tel" inputmode="tel" value="' + esc(b.phone) + '" placeholder="98XXXXXXXX">', e.phone, 'Used for WhatsApp messages. Indian numbers get +91 automatically.') +
-      field('Email', '<input name="email" type="email" inputmode="email" value="' + esc(b.email) + '" placeholder="For the review request email (optional)">', e.email) +
-      '<div class="two">' + field('Nationality *', '<select name="nationality">' + options(['Indian', 'Foreign'], b.nationality) + '</select>', e.nationality) +
-      field('Country' + (b.nationality === 'Foreign' ? ' *' : ''), '<input name="country" value="' + esc(b.country) + '" placeholder="If foreign">', e.country) + '</div>' +
-      '<div class="two">' + field('Gender *', '<select name="gender">' + options(['', 'Male', 'Female', 'Other'], b.gender || '', function (x) { return x || 'Choose'; }) + '</select>', e.gender) +
-      field('Address (city, state) *', '<input name="address" value="' + esc(b.address || '') + '">', e.address) + '</div>' +
-      '<div class="two">' + field('ID type *', '<select name="idType">' + options(s.idTypes, b.idType) + '</select>', e.idType) +
-      field('ID number *', '<input name="idValue" value="' + esc(b.idValue) + '" ' + (s.idMode === 'full' ? '' : 'maxlength="4"') + ' autocomplete="off">', e.idValue, idHint) + '</div>' +
+      field('Full name', '<input name="guestName" value="' + esc(b.guestName) + '" autocomplete="off">', e.guestName) +
+      field('Mobile number', '<input name="phone" type="tel" inputmode="tel" value="' + esc(b.phone) + '" placeholder="98XXXXXXXX">', e.phone, 'Used for WhatsApp messages. Indian numbers get +91 automatically.') +
+      field('Email', '<input name="email" type="email" inputmode="email" value="' + esc(b.email) + '" placeholder="For the review request email">', e.email) +
+      '<div class="two">' + field('Nationality', '<select name="nationality">' + options(['Indian', 'Foreign'], b.nationality) + '</select>', e.nationality) +
+      field('Country', '<input name="country" value="' + esc(b.country) + '" placeholder="If foreign">', e.country) + '</div>' +
+      '<div class="two">' + field('Gender', '<select name="gender">' + options(['', 'Male', 'Female', 'Other'], b.gender || '', function (x) { return x || 'Choose'; }) + '</select>', e.gender) +
+      field('Address (city, state)', '<input name="address" value="' + esc(b.address || '') + '">', e.address) + '</div>' +
+      '<div class="two">' + field('ID type', '<select name="idType">' + options(s.idTypes, b.idType) + '</select>', e.idType) +
+      field('ID number', '<input name="idValue" value="' + esc(b.idValue) + '" ' + (s.idMode === 'full' ? '' : 'maxlength="4"') + ' autocomplete="off">', e.idValue, idHint) + '</div>' +
       '<p class="small">This is the main guest. Add everyone else, their ID photos, passports and visas on the booking page after saving (Guests & IDs).</p>' +
-      '<div class="two">' + field('Adults *', '<input name="adults" type="number" inputmode="numeric" min="1" value="' + esc(b.adults) + '">', e.adults) +
+      '<div class="two">' + field('Adults', '<input name="adults" type="number" inputmode="numeric" min="0" value="' + esc(b.adults) + '">', e.adults) +
       field('Children', '<input name="children" type="number" inputmode="numeric" min="0" value="' + esc(b.children) + '">', e.children) + '</div></div>' +
 
       '<div class="card"><h3>Stay</h3>' +
-      '<div class="fld"><span>Rooms * <small style="display:inline">— charge for the whole stay, per room</small></span><div id="roomsBox"></div>' + (e.roomId ? '<em class="err">' + esc(e.roomId) + '</em>' : '') + '</div>' +
-      '<div class="actions"><button type="button" class="btn sm" id="addRoom">＋ Add room</button><button type="button" class="btn sm" id="wholeProp">Book whole property</button><button type="button" class="btn sm" id="ratecard">Fill charges from rate card</button></div>' +
-      '<div class="two">' + field('Check-in *', '<input name="checkIn" type="date" value="' + esc(b.checkIn) + '">', e.checkIn) +
-      field('Check-out *', '<input name="checkOut" type="date" value="' + esc(b.checkOut) + '">', e.checkOut) + '</div>' +
+      '<div class="two">' + field('Check-in', '<input name="checkIn" type="date" value="' + esc(b.checkIn) + '">', e.checkIn) +
+      field('Check-out', '<input name="checkOut" type="date" value="' + esc(b.checkOut) + '">', e.checkOut) + '</div>' +
       '<div class="nights" id="nights"></div>' +
-      '<div class="two">' + field('Booking source *', '<select name="source">' + options(s.sources, b.source) + '</select>') +
-      field('Status *', '<select name="status">' + options(A.STATUSES.concat(A.STATUSES.indexOf(b.status) < 0 ? [b.status] : []), b.status) + '</select>') + '</div>' +
+      '<div class="fld"><span>Rooms <small style="display:inline">— filled from the tariff × nights; type over it to change</small></span><div id="roomsBox"></div>' + (e.roomId ? '<em class="err">' + esc(e.roomId) + '</em>' : '') + '</div>' +
+      '<div class="actions"><button type="button" class="btn sm" id="addRoom">＋ Add room</button><button type="button" class="btn sm" id="ratecard">Recalculate all from tariff</button></div>' +
+      '<div class="two">' + field('Booking source', '<select name="source">' + options(s.sources, b.source) + '</select>') +
+      field('Status', '<select name="status">' + options(A.STATUSES.concat(A.STATUSES.indexOf(b.status) < 0 ? [b.status] : []), b.status) + '</select>') + '</div>' +
       '<div id="overlap"></div></div>' +
 
-      '<div class="card"><h3>Charges (₹)</h3>' +
-      '<div class="two">' + field('Room charges (total)', '<input name="roomTotalView" readonly tabindex="-1" value="">', e.room, 'Sum of the room charges above.') +
-      '<span></span></div>' +
-      '<div class="fld"><span>Food & extra charges <small style="display:inline">— one line each, whole booking</small></span><div id="chargesBox"></div></div>' +
-      '<div class="actions"><button type="button" class="btn sm" id="addCharge">＋ Add charge</button></div>' +
+      '<div class="card"><h3>Food & services (day by day)</h3>' +
+      '<p class="small">Tick a meal to charge it: persons fill in from the guests on the booking and the price from your meal rates (More → Settings). Change any number by hand. Days with nothing on them are left off the bill.</p>' +
+      '<div id="quickMeals" class="actions"></div><div id="daysBox"></div>' +
+      '<details class="fld" id="wholeBox"' + ((b.charges || []).some(function (c) { return !(num(c.day) > 0); }) ? ' open' : '') + '><summary>Other charges for the whole stay (not day-wise)</summary><div id="chargesBox"></div><div class="actions"><button type="button" class="btn sm" id="addCharge">＋ Add charge</button></div></details>' +
+      '</div>' +
+
+      '<div class="card"><h3>Discount, commission & GST (₹)</h3>' +
+      '<div class="two">' + field('Room charges (total)', '<input name="roomTotalView" readonly tabindex="-1" value="">', e.room, 'Sum of the room lines above.') +
+      field('Food & services (total)', '<input name="extrasView" readonly tabindex="-1" value="">') + '</div>' +
       '<div class="two">' + field('Discount', '<input name="discount" type="number" inputmode="decimal" min="0" step="any" value="' + esc(b.discount) + '">', e.discount) +
       field('Platform commission', '<input name="commission" type="number" inputmode="decimal" min="0" step="any" value="' + esc(b.commission) + '">', e.commission, 'Your expense. Never added to or taken off the guest bill.') + '</div>' +
       couponFields(b, e) +
       '<label class="chk"><input type="checkbox" name="gstOn"' + (b.gstOn ? ' checked' : '') + '> Charge GST on this bill</label>' +
       '<div id="gstbox" class="three' + (b.gstOn ? '' : ' hide') + '">' +
-      field('Room GST %', '<input name="gstRoomRate" type="number" inputmode="decimal" step="any" value="' + esc(b.gstRoomRate) + '">', '', 'Auto: ≤ ₹' + s.gstThreshold + '/night → ' + s.gstRoomLow + '%') +
+      field('Room GST %', '<input name="gstRoomRate" type="number" inputmode="decimal" step="any" value="' + esc(b.gstRoomRate) + '">', '', 'Auto from the amount charged per room per night: up to ₹' + s.gstThreshold + ' → ' + s.gstRoomLow + '%, above → ' + s.gstRoomHigh + '%') +
       field('Food GST %', '<input name="gstFoodRate" type="number" inputmode="decimal" step="any" value="' + esc(b.gstFoodRate) + '">') +
       field('Other GST %', '<input name="gstOtherRate" type="number" inputmode="decimal" step="any" value="' + esc(b.gstOtherRate) + '">') + '</div>' +
       '<div id="cancelbox" class="' + (b.status === 'Cancelled' ? '' : 'hide') + '"><div class="two">' +
@@ -449,14 +479,14 @@
       field('Commission on fee', '<input name="cancelCommission" type="number" inputmode="decimal" min="0" step="any" value="' + esc(b.cancelCommission) + '">', e.cancelCommission) + '</div></div>' +
       '<div class="calcbox" id="calcbox"></div></div>' +
 
-      (formState.isNew ? '<div class="card"><h3>Payments received now</h3><div id="paysBox"></div><div class="actions"><button type="button" class="btn sm" id="addPay">＋ Add payment</button></div><p class="small">Add one line per payment, e.g. advance by UPI and balance in cash. Leave empty if nothing is paid yet. Later payments: Record payment on the booking page.</p></div>' : '') +
+      (formState.isNew ? '<div class="card"><h3>Payments received now</h3><div id="paysBox"></div><div class="actions"><button type="button" class="btn sm" id="addPay">＋ Add payment</button></div><p class="small">Add one line per payment, e.g. advance by UPI and balance in cash. Lines left without an amount are ignored. Later payments: Record payment on the booking page.</p></div>' : '') +
       ((s.customFields || []).filter(function (x) { return x.label; }).length ? '<div class="card"><h3>More details</h3>' + s.customFields.filter(function (x) { return x.label; }).map(function (cf) {
-        return field(esc(cf.label) + (cf.required ? ' *' : ''), '<input data-cf="' + esc(cf.id) + '" value="' + esc((b.custom || {})[cf.id] || '') + '">');
-      }).join('') + (e.custom ? '<em class="err">' + esc(e.custom) + '</em>' : '') + '</div>' : '') +
+        return field(esc(cf.label), '<input data-cf="' + esc(cf.id) + '" value="' + esc((b.custom || {})[cf.id] || '') + '">');
+      }).join('') + '</div>' : '') +
 
-      '<div class="card"><h3>Notes (optional)</h3>' +
+      '<div class="card"><h3>Notes</h3>' +
       field('Special requests', '<textarea name="specialRequests" rows="2">' + esc(b.specialRequests) + '</textarea>') +
-      '<details class="fld"><summary>Bill to a company (optional, for GST invoice)</summary><div class="two">' + field('Company name', '<input name="billTo" value="' + esc(b.billTo || '') + '">') + field('Company GSTIN', '<input name="billGstin" value="' + esc(b.billGstin || '') + '" autocapitalize="characters" maxlength="15">') + '</div></details>' +
+      '<details class="fld"><summary>Bill to a company (for GST invoice)</summary><div class="two">' + field('Company name', '<input name="billTo" value="' + esc(b.billTo || '') + '">') + field('Company GSTIN', '<input name="billGstin" value="' + esc(b.billGstin || '') + '" autocapitalize="characters" maxlength="15">') + '</div></details>' +
       field('Internal notes (not on bill)', '<textarea name="notes" rows="2">' + esc(b.notes) + '</textarea>') + '</div>' +
       '<div class="errsum" id="errsum"></div>' +
       '<button class="btn primary big" type="submit">Save booking</button>' +
@@ -487,6 +517,9 @@
     g.primary = true; g.name = b.guestName; g.phone = b.phone; g.email = b.email; g.nationality = b.nationality; g.country = b.country;
     g.idType = b.idType; g.idNumber = b.idValue; if (b.gender) g.gender = b.gender; if (b.address) g.address = b.address;
   }
+  function guestCount(b) { return Math.max(1, Math.round(num(b.adults)) + Math.round(num(b.children))); }
+  function mealRate(m) { return num((S().mealRates || {})[m]); }
+  function serviceRate(name) { var x = (S().services || []).filter(function (v) { return v.name === name; })[0]; return x ? num(x.rate) : 0; }
   function readForm() {
     var f = $('#bf'), b = formState.b;
     ['guestName', 'phone', 'email', 'nationality', 'country', 'idType', 'idValue', 'adults', 'children', 'checkIn', 'checkOut', 'source', 'status',
@@ -494,18 +527,17 @@
       .forEach(function (k) { if (f.elements[k]) b[k] = f.elements[k].value; });
     b.gstOn = f.elements.gstOn.checked;
     var lines = $$('#roomsBox .roomline', f);
-    if (lines.length) b.rooms = lines.map(function (ln, i) {
+    b.rooms = lines.map(function (ln, i) {
       var old = (b.rooms || [])[i] || {};
-      return { roomId: $('[data-rk="roomId"]', ln).value, charge: $('[data-rk="charge"]', ln).value, gstRate: old.gstRate };
+      return { roomId: $('[data-rk="roomId"]', ln).value, charge: $('[data-rk="charge"]', ln).value, gstRate: old.gstRate, auto: old.auto };
     });
-    b.room = A.roomTotal(b); b.roomId = (b.rooms[0] || {}).roomId || '';
-    var cl = $$('#chargesBox .chargeline', f);
-    b.charges = cl.map(function (ln) { return { type: $('[data-ck="type"]', ln).value, name: $('[data-ck="name"]', ln).value.trim(), amount: $('[data-ck="amount"]', ln).value }; });
+    b.room = A.roomTotal(b); b.roomId = (b.rooms.filter(function (r) { return r.roomId; })[0] || {}).roomId || '';
+    /* Food & service lines live in formState.b.charges; inputs write into them directly (see bindForm). */
     A.applyCharges(b);
     b.custom = b.custom || {}; $$('[data-cf]', f).forEach(function (el) { b.custom[el.dataset.cf] = el.value.trim(); });
     formState.pays = $$('#paysBox .payline', f).map(function (ln) { return { amount: $('[data-pk="amount"]', ln).value, method: $('[data-pk="method"]', ln).value, date: $('[data-pk="date"]', ln).value, ref: $('[data-pk="ref"]', ln).value.trim() }; });
     readCoupon(f, b);
-    b.guestName = b.guestName.trim(); b.phone = b.phone.trim(); b.email = String(b.email || '').trim();
+    b.guestName = String(b.guestName || '').trim(); b.phone = String(b.phone || '').trim(); b.email = String(b.email || '').trim();
     if (S().idMode !== 'full') b.idValue = String(b.idValue).replace(/\s/g, '').slice(-4);
     return b;
   }
@@ -513,28 +545,149 @@
     var f = $('#bf');
     function roomOpts(sel) {
       var b = formState.b, list = S().rooms.filter(function (r) { return r.active !== false || A.roomIds(b).indexOf(r.id) >= 0; });
-      return options(list, sel);
+      return '<option value="">— Room not decided —</option>' + options(list, sel);
+    }
+    /* Auto price for one room: tariff (or season rate) for every night of the stay. */
+    function autoCharge(r, b) { return r.roomId && A.nights(b.checkIn, b.checkOut) > 0 ? A.rateCardTotal(S(), r.roomId, b.checkIn, b.checkOut) : 0; }
+    function roomHint(r, b) {
+      var n = A.nights(b.checkIn, b.checkOut), room = S().rooms.filter(function (x) { return x.id === r.roomId; })[0];
+      if (!r.roomId) return 'Choose a room to price it.';
+      if (n < 1) return 'Choose check-in and check-out to price it.';
+      var v = autoCharge(r, b);
+      if (!v) return 'No tariff set for ' + (room ? room.name : 'this room') + ' (More → Settings → Rooms). Type the amount.';
+      var flat = room && num(room.tariff) * n === v;
+      var calc = flat ? inr(room.tariff) + ' × ' + n + ' night' + (n > 1 ? 's' : '') + ' = ' + inr(v) : 'Tariff with season rates, ' + n + ' night' + (n > 1 ? 's' : '') + ' = ' + inr(v);
+      return calc + (r.auto === false && r2(r.charge) !== v ? ' · <button type="button" class="linkbtn" data-recalc="' + '__I__' + '">Use ' + inr(v) + '</button>' : '');
     }
     function drawRooms() {
       var b = formState.b;
+      if (!b.rooms.length) b.rooms.push({ roomId: '', charge: '', auto: true });
       $('#roomsBox').innerHTML = b.rooms.map(function (r, i) {
         return '<div class="roomline"><select data-rk="roomId" aria-label="Room ' + (i + 1) + '">' + roomOpts(r.roomId) + '</select>' +
           '<input data-rk="charge" type="number" inputmode="decimal" min="0" step="any" placeholder="₹ whole stay" value="' + esc(r.charge) + '" aria-label="Charge for room ' + (i + 1) + '">' +
-          (b.rooms.length > 1 ? '<button type="button" class="x" data-rmroom="' + i + '" aria-label="Remove room">✕</button>' : '<span></span>') + '</div>';
+          (b.rooms.length > 1 ? '<button type="button" class="x" data-rmroom="' + i + '" aria-label="Remove room">✕</button>' : '<span></span>') +
+          '<small class="rhint" data-rh="' + i + '"></small></div>';
       }).join('');
       $$('[data-rmroom]').forEach(function (x) { x.onclick = function () { readForm(); formState.b.rooms.splice(+x.dataset.rmroom, 1); drawRooms(); refresh('rooms'); }; });
+      $$('#roomsBox [data-rk="charge"]').forEach(function (el, i) { el.addEventListener('input', function () { formState.b.rooms[i].auto = false; }); });
+      $$('#roomsBox [data-rk="roomId"]').forEach(function (el, i) { el.addEventListener('change', function () { formState.b.rooms[i].auto = formState.b.rooms[i].auto !== false || !formState.b.rooms[i].charge; }); });
     }
+    /* Re-price auto lines when dates or rooms change; show the sum on each line. */
+    function priceRooms() {
+      var b = formState.b;
+      $$('#roomsBox .roomline').forEach(function (ln, i) {
+        var r = b.rooms[i]; if (!r) return;
+        if (r.auto !== false) { var v = autoCharge(r, b); if (v) { r.charge = v; $('[data-rk="charge"]', ln).value = v; } }
+        var h = $('[data-rh="' + i + '"]', ln); if (h) h.innerHTML = roomHint(r, b).replace('__I__', i);
+      });
+      $$('[data-recalc]').forEach(function (x) { x.onclick = function () { var i = +x.dataset.recalc; readForm(); formState.b.rooms[i].auto = true; refresh('rooms'); }; });
+      b.room = A.roomTotal(b);
+    }
+
+    /* ---- food (Breakfast / Lunch / Dinner per day) and services per day ---- */
+    function lineFor(day, meal) { return (formState.b.charges || []).filter(function (c) { return c.type === 'Food' && !c.kind && num(c.day) === day && c.meal === meal; })[0]; }
+    function dayLines(day) { return (formState.b.charges || []).filter(function (c) { return num(c.day) === day; }); }
+    function dayTotal(day) { return A.sum(dayLines(day), function (c) { return c.amount; }); }
+    function fmtDay(d) { var x = A.dayDate(formState.b, d); return 'Day ' + d + (x ? ' · ' + A.fmtLong(x) : ''); }
+    function svcOpts(sel) { var list = (S().services || []).map(function (v) { return v.name; }).filter(Boolean); if (sel && list.indexOf(sel) < 0) list.push(sel); return options(list.concat(['__other']), sel || '', function (x) { return x === '__other' ? 'Other (type the name)…' : x; }); }
+    var openDays = {};
+    function drawDays() {
+      var b = formState.b, D = A.stayDays(b);
+      b.charges = b.charges || [];
+      /* lines for days that are no longer in the stay */
+      var gone = b.charges.filter(function (c) { return num(c.day) > D; });
+      if (gone.length) { b.charges = b.charges.filter(function (c) { return !(num(c.day) > D); }); toast(gone.length + ' food/service line' + (gone.length > 1 ? 's' : '') + ' removed: the stay is now ' + (D ? D + ' days' : 'without dates'), true); }
+      $('#quickMeals').innerHTML = D ? '<span class="small" style="align-self:center">Tick for every day:</span>' + A.MEALS.map(function (m) { return '<button type="button" class="btn sm" data-allmeal="' + m + '">' + m + '</button>'; }).join('') : '';
+      if (!D) { $('#daysBox').innerHTML = '<p class="small">Choose check-in and check-out to get day-wise food and services.</p>'; }
+      else {
+        var html = '';
+        for (var d = 1; d <= D; d++) {
+          var tot = dayTotal(d);
+          html += '<details class="day" data-day="' + d + '"' + (openDays[d] ? ' open' : '') + '><summary><span>' + esc(fmtDay(d)) + '</span><b data-dtot="' + d + '">' + (tot ? inr(tot) : '—') + '</b></summary>';
+          html += A.MEALS.map(function (m) {
+            var c = lineFor(d, m), rate = mealRate(m);
+            return '<div class="meal"><label class="chk"><input type="checkbox" data-meal="' + m + '" data-d="' + d + '"' + (c ? ' checked' : '') + '> ' + m + '</label>' +
+              '<input type="number" inputmode="numeric" min="0" data-mq="' + m + '" data-d="' + d + '" value="' + (c ? esc(c.qty) : '') + '" placeholder="persons" aria-label="' + m + ' persons, day ' + d + '"' + (c ? '' : ' disabled') + '>' +
+              '<input type="number" inputmode="decimal" min="0" step="any" data-ma="' + m + '" data-d="' + d + '" value="' + (c ? esc(c.amount) : '') + '" placeholder="₹" aria-label="' + m + ' amount, day ' + d + '"' + (c ? '' : ' disabled') + '>' +
+              '<small>' + (rate ? '@ ' + inr(rate) + '/person' : 'Set the rate in Settings') + '</small></div>';
+          }).join('');
+          var items = (b.charges || []).filter(function (c) { return c.kind === 'item' && num(c.day) === d; });
+          if (items.length) html += '<div class="fsnote' + (items.some(function (c) { return (c.flags || []).length; }) ? ' bad' : '') + '">Menu items / bill: ' + items.length + ' line' + (items.length > 1 ? 's' : '') + ', ' + inr(A.sum(items, function (c) { return c.amount; })) + ' — edit them on the Food & services page after saving.</div>';
+          var sv = (b.charges || []).map(function (c, i) { return { c: c, i: i }; }).filter(function (x) { return x.c.type !== 'Food' && !x.c.kind && num(x.c.day) === d; });
+          html += sv.map(function (x) {
+            var known = (S().services || []).some(function (v) { return v.name === x.c.name; });
+            var sel = x.c.custom || (!known && x.c.name) ? '__other' : (x.c.name || ((S().services || [])[0] || {}).name || '__other');
+            return '<div class="svc"><select data-sn="' + x.i + '" aria-label="Service">' + svcOpts(sel) + '</select>' +
+              '<input data-sq="' + x.i + '" type="number" inputmode="numeric" min="0" value="' + esc(x.c.qty) + '" placeholder="qty" aria-label="Quantity">' +
+              '<input data-sa="' + x.i + '" type="number" inputmode="decimal" min="0" step="any" value="' + esc(x.c.amount) + '" placeholder="₹" aria-label="Amount">' +
+              '<button type="button" class="x" data-rmsvc="' + x.i + '" aria-label="Remove service">−</button>' +
+              (sel === '__other' ? '<input data-sx="' + x.i + '" value="' + esc(x.c.name || '') + '" placeholder="What for, e.g. guided trek" aria-label="Service name">' : '') + '</div>';
+          }).join('');
+          html += '<div class="actions"><button type="button" class="btn sm" data-addsvc="' + d + '">＋ Service on day ' + d + '</button></div></details>';
+        }
+        $('#daysBox').innerHTML = html;
+      }
+      bindDays();
+    }
+    function setLineAmount(c) { if (!c.amtManual) c.amount = r2(num(c.qty) * num(c.rate)); }
+    function dayTotals() { $$('[data-dtot]').forEach(function (el) { var t = dayTotal(+el.dataset.dtot); el.textContent = t ? inr(t) : '—'; }); }
+    function bindDays() {
+      var b = formState.b;
+      $$('#daysBox details.day').forEach(function (dt) { dt.addEventListener('toggle', function () { openDays[dt.dataset.day] = dt.open; }); });
+      $$('[data-meal]').forEach(function (el) {
+        el.onchange = function () {
+          var d = +el.dataset.d, m = el.dataset.meal, c = lineFor(d, m);
+          if (el.checked && !c) { c = { type: 'Food', day: d, meal: m, name: m, qty: guestCount(readForm()), rate: mealRate(m), amount: 0, qtyAuto: true }; setLineAmount(c); b.charges.push(c); }
+          if (!el.checked && c) b.charges.splice(b.charges.indexOf(c), 1);
+          openDays[d] = true; drawDays(); refresh('charges');
+        };
+      });
+      $$('[data-mq]').forEach(function (el) { el.oninput = function () { var c = lineFor(+el.dataset.d, el.dataset.mq); if (!c) return; c.qty = el.value; c.qtyAuto = false; setLineAmount(c); var a = $('[data-ma="' + el.dataset.mq + '"][data-d="' + el.dataset.d + '"]'); if (a) a.value = c.amount; dayTotals(); refresh('charges'); }; });
+      $$('[data-ma]').forEach(function (el) { el.oninput = function () { var c = lineFor(+el.dataset.d, el.dataset.ma); if (!c) return; c.amount = el.value; c.amtManual = true; dayTotals(); refresh('charges'); }; });
+      $$('[data-allmeal]').forEach(function (btn) {
+        btn.onclick = function () {
+          var m = btn.dataset.allmeal, D = A.stayDays(readForm()), n = guestCount(b);
+          for (var d = 1; d <= D; d++) if (!lineFor(d, m)) { var c = { type: 'Food', day: d, meal: m, name: m, qty: n, rate: mealRate(m), amount: 0, qtyAuto: true }; setLineAmount(c); b.charges.push(c); }
+          drawDays(); refresh('charges'); toast(m + ' ticked for all ' + D + ' days');
+        };
+      });
+      $$('[data-addsvc]').forEach(function (btn) {
+        btn.onclick = function () {
+          var d = +btn.dataset.addsvc, first = (S().services || []).filter(function (v) { return v.name; })[0];
+          var c = first ? { type: 'Other', day: d, name: first.name, qty: 1, rate: num(first.rate), amount: num(first.rate) } : { type: 'Other', day: d, name: '', custom: true, qty: 1, rate: 0, amount: '' };
+          b.charges.push(c); openDays[d] = true; drawDays(); refresh('charges');
+        };
+      });
+      $$('[data-sn]').forEach(function (el) {
+        el.onchange = function () {
+          var c = b.charges[+el.dataset.sn]; if (!c) return;
+          if (el.value === '__other') { c.custom = true; c.name = ''; }
+          else { c.custom = false; c.name = el.value; c.rate = serviceRate(el.value); c.amtManual = false; setLineAmount(c); }
+          drawDays(); refresh('charges');
+        };
+      });
+      $$('[data-sx]').forEach(function (el) { el.oninput = function () { var c = b.charges[+el.dataset.sx]; if (c) c.name = el.value.trim(); }; });
+      $$('[data-sq]').forEach(function (el) { el.oninput = function () { var c = b.charges[+el.dataset.sq]; if (!c) return; c.qty = el.value; if (num(c.rate)) { setLineAmount(c); var a = $('[data-sa="' + el.dataset.sq + '"]'); if (a) a.value = c.amount; } dayTotals(); refresh('charges'); }; });
+      $$('[data-sa]').forEach(function (el) { el.oninput = function () { var c = b.charges[+el.dataset.sa]; if (!c) return; c.amount = el.value; c.amtManual = true; dayTotals(); refresh('charges'); }; });
+      $$('[data-rmsvc]').forEach(function (x) { x.onclick = function () { b.charges.splice(+x.dataset.rmsvc, 1); drawDays(); refresh('charges'); }; });
+    }
+    /* Older-style lines (no day): kept for whole-stay extras and for bookings made before version 1.7. */
     function drawCharges() {
       var b = formState.b;
-      $('#chargesBox').innerHTML = (b.charges || []).map(function (c, i) {
-        return '<div class="chargeline"><select data-ck="type" aria-label="Type">' + options([{ id: 'Food', name: 'Food' }, { id: 'Other', name: 'Other' }], c.type || 'Food') + '</select>' +
-          '<input data-ck="name" value="' + esc(c.name || '') + '" placeholder="' + (c.type === 'Other' ? 'Bonfire, pick-up…' : 'Breakfast, dinner…') + '" aria-label="What for">' +
-          '<input data-ck="amount" type="number" inputmode="decimal" min="0" step="any" value="' + esc(c.amount) + '" placeholder="₹" aria-label="Amount">' +
+      var list = (b.charges || []).map(function (c, i) { return { c: c, i: i }; }).filter(function (x) { return !(num(x.c.day) > 0) && !x.c.kind; });
+      $('#chargesBox').innerHTML = list.map(function (x) {
+        var c = x.c, i = x.i;
+        return '<div class="chargeline"><select data-ck="type" data-ci="' + i + '" aria-label="Type">' + options([{ id: 'Food', name: 'Food' }, { id: 'Other', name: 'Other' }], c.type || 'Other') + '</select>' +
+          '<input data-ck="name" data-ci="' + i + '" value="' + esc(c.name || '') + '" placeholder="' + (c.type === 'Food' ? 'Food & beverages' : 'Bonfire, pick-up…') + '" aria-label="What for">' +
+          '<input data-ck="amount" data-ci="' + i + '" type="number" inputmode="decimal" min="0" step="any" value="' + esc(c.amount) + '" placeholder="₹" aria-label="Amount">' +
           '<button type="button" class="x" data-rmcharge="' + i + '" aria-label="Remove line">−</button></div>';
-      }).join('') || '<p class="small">No food or extra charges.</p>';
-      $$('[data-rmcharge]').forEach(function (x) { x.onclick = function () { readForm(); formState.b.charges.splice(+x.dataset.rmcharge, 1); drawCharges(); refresh('charges'); }; });
+      }).join('') || '<p class="small">None.</p>';
+      $$('[data-ck]').forEach(function (el) {
+        el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', function () { var c = formState.b.charges[+el.dataset.ci]; if (!c) return; c[el.dataset.ck] = el.dataset.ck === 'name' ? el.value.trim() : el.value; refresh('charges'); });
+      });
+      $$('[data-rmcharge]').forEach(function (x) { x.onclick = function () { formState.b.charges.splice(+x.dataset.rmcharge, 1); drawCharges(); refresh('charges'); }; });
     }
-    $('#addCharge').onclick = function () { readForm(); formState.b.charges.push({ type: 'Food', name: '', amount: '' }); drawCharges(); var ls = $$('#chargesBox [data-ck="name"]'); if (ls.length) ls[ls.length - 1].focus(); };
+    $('#addCharge').onclick = function () { formState.b.charges.push({ type: 'Other', name: '', amount: '' }); drawCharges(); var ls = $$('#chargesBox [data-ck="name"]'); if (ls.length) ls[ls.length - 1].focus(); };
     drawCharges();
     function drawPays() {
       var box = $('#paysBox'); if (!box) return;
@@ -554,18 +707,22 @@
     $('#addRoom').onclick = function () {
       var b = readForm(), free = freeIds(b);
       if (!free.length) return toast('Every room is already on this booking.', true);
-      b.rooms.push({ roomId: free[0], charge: '' }); drawRooms(); refresh('rooms');
-    };
-    $('#wholeProp').onclick = function () {
-      var b = readForm(), have = {};
-      b.rooms.forEach(function (r) { have[r.roomId] = r; });
-      b.rooms = A.activeRooms(S()).map(function (r) { return have[r.id] || { roomId: r.id, charge: '' }; });
-      drawRooms(); refresh('rooms'); toast('All ' + b.rooms.length + ' rooms added');
+      b.rooms.push({ roomId: free[0], charge: '', auto: true }); drawRooms(); refresh('rooms');
     };
     drawRooms();
+    var lastDays = null, lastGuests = null;
     function refresh(changedName) {
       var b = readForm(), s = S();
-      f.elements.roomTotalView.value = inr(A.roomTotal(b));
+      priceRooms();
+      var D = A.stayDays(b);
+      if (D !== lastDays) { lastDays = D; drawDays(); }
+      /* guests changed: meal lines that still use the guest count follow it */
+      var gc = guestCount(b);
+      if (lastGuests !== null && gc !== lastGuests) { (b.charges || []).forEach(function (c) { if (c.type === 'Food' && c.qtyAuto) { c.qty = gc; setLineAmount(c); } }); drawDays(); }
+      lastGuests = gc;
+      A.applyCharges(b);
+      f.elements.roomTotalView.value = inr(A.roomTotal(b)) + (A.stayLabel(b) ? ' (' + A.stayLabel(b) + ')' : '');
+      f.elements.extrasView.value = inr(r2(num(b.food) + num(b.additional)));
       if (changedName === 'gstRoomRate') b.gstRateManual = true;
       if (b.gstOn && !b.gstRateManual && changedName !== 'gstRoomRate') {
         var rates = A.autoRoomRates(b, s);
@@ -574,7 +731,7 @@
         b.gstRoomRate = auto; f.elements.gstRoomRate.value = auto;
         var mixed = b.rooms.some(function (r) { return r.gstRate !== b.rooms[0].gstRate; });
         var hint = $('#gstbox .fld small');
-        if (hint) hint.textContent = mixed ? 'Per room: ' + b.rooms.map(function (r) { return roomName(r.roomId) + ' ' + r.gstRate + '%'; }).join(', ') : 'Auto: ≤ ₹' + s.gstThreshold + '/night per room → ' + s.gstRoomLow + '%';
+        if (hint) hint.textContent = mixed ? 'Per room: ' + b.rooms.filter(function (r) { return r.roomId; }).map(function (r) { return roomName(r.roomId) + ' ' + r.gstRate + '%'; }).join(', ') : 'Auto: ≤ ₹' + s.gstThreshold + '/night per room → ' + s.gstRoomLow + '%, above → ' + s.gstRoomHigh + '%';
       }
       if (b.gstRateManual) b.rooms.forEach(function (r) { delete r.gstRate; });
       if (changedName === 'gstRoomRate') b.gstRateManual = true;
@@ -583,17 +740,15 @@
       var cs = f.elements.couponSel.value; $('#couponCustom').classList.toggle('hide', cs !== 'pct' && cs !== 'amt');
       if (changedName === 'couponSel') { var lab = $('#couponCustom .fld > span'); if (lab) lab.textContent = cs === 'amt' ? 'Coupon amount ₹' : 'Coupon %'; if (!cs) f.elements.couponCode.value = ''; }
       var n = A.nights(b.checkIn, b.checkOut);
-      $('#nights').textContent = n > 0 ? n + ' night' + (n > 1 ? 's' : '') : '';
+      $('#nights').textContent = n > 0 ? A.stayLabel(b) + ' · ' + (n + 1) + ' days, ' + n + ' night' + (n > 1 ? 's' : '') : (A.isDate(b.checkIn) && A.isDate(b.checkOut) ? 'Check-out must be after check-in' : 'Dates not set yet');
       var c = calc(b);
-      $('#calcbox').innerHTML = (b.status === 'Cancelled' ? row('Cancellation fee', inr(c.cancelFee)) :
-        row('Room', inr(c.room)) + row('Food', inr(c.food)) + row('Additional', inr(c.additional)) + row('Discount', '−' + inr(c.discount)) + (c.coupon ? row('Coupon ' + c.couponLabel, '−' + inr(c.coupon)) : '') + row('Taxable value', inr(c.taxable)) +
-        (b.gstOn ? row('GST', inr(c.gst)) : '')) +
+      $('#calcbox').innerHTML = (b.status === 'Cancelled' ? row('Cancellation fee', inr(c.cancelFee)) : billRows(b, c)) +
         row('Total bill', inr(c.total), 'strong') +
         row('Commission (your expense)', inr(c.commission), 'muted') + row('Net after commission (excl. GST)', inr(c.net), 'muted');
-      var ov = A.overlaps(data.bookings, b);
+      var ov = A.overlaps(data.bookings, b, S());
       /* Only redraw the warning when its text changes: redrawing while the guest taps the box (a blur on another field
          fires "change") destroyed the checkbox under the finger, so the tick never landed. */
-      var ovMsg = ov.length && b.status !== 'Cancelled' ? esc(roomsLabel(b)) + ' is already taken by ' + ov.map(function (o) { return esc(o.guestName) + ' (' + fmtShort(o.checkIn) + '–' + fmtShort(o.checkOut) + ', ' + esc(o.status) + ')'; }).join('; ') : '';
+      var ovMsg = ov.length && b.status !== 'Cancelled' ? esc(roomsLabel(b)) + ' is already taken by ' + ov.map(function (o) { return esc(gname(o)) + ' (' + esc(roomsLabel(o)) + ', ' + fmtShort(o.checkIn) + '–' + fmtShort(o.checkOut) + ', ' + esc(o.status) + ')'; }).join('; ') : '';
       var ovBox = $('#overlap');
       if (ovBox.dataset.msg !== ovMsg) {
         var wasTicked = (($('#override') || {}).checked);
@@ -601,25 +756,19 @@
         ovBox.innerHTML = ovMsg ? '<div class="warn"><b>Double-booking warning.</b> ' + ovMsg + '.<label class="chk ovr"><input type="checkbox" id="override"' + (wasTicked ? ' checked' : '') + '> I understand — save anyway (override)</label></div>' : '';
       }
     }
-    f.addEventListener('input', function (ev) { if (ev.target.id !== 'override') refresh(ev.target.name); });
-    f.addEventListener('change', function (ev) { if (ev.target.id !== 'override') refresh(ev.target.name); });
+    f.addEventListener('input', function (ev) { if (ev.target.id !== 'override' && !ev.target.closest('#daysBox') && !ev.target.closest('#chargesBox')) refresh(ev.target.name); });
+    f.addEventListener('change', function (ev) { if (ev.target.id !== 'override' && !ev.target.closest('#daysBox') && !ev.target.closest('#chargesBox')) refresh(ev.target.name); });
     $('#ratecard').onclick = function () {
       var b = readForm(), missing = [];
-      b.rooms.forEach(function (r) { var v = A.rateCardTotal(S(), r.roomId, b.checkIn, b.checkOut); if (v) r.charge = v; else missing.push(roomName(r.roomId)); });
-      drawRooms(); refresh('rooms');
-      toast(missing.length ? 'No tariff set for ' + missing.join(', ') + ' (Settings → Rooms)' : 'Room charges filled from rate card: ' + inr(A.roomTotal(b)), !!missing.length);
+      b.rooms.forEach(function (r) { if (!r.roomId) return; var v = autoCharge(r, b); r.auto = true; if (!v) missing.push(roomName(r.roomId)); });
+      refresh('rooms');
+      toast(A.nights(b.checkIn, b.checkOut) < 1 ? 'Choose check-in and check-out first.' : missing.length ? 'No tariff set for ' + missing.join(', ') + ' (Settings → Rooms)' : 'Room charges from tariff: ' + inr(A.roomTotal(b)), !!missing.length || A.nights(b.checkIn, b.checkOut) < 1);
     };
     refresh();
     f.onsubmit = function (ev) {
       ev.preventDefault();
       var b = readForm(), errs = A.validateBooking(b, S());
-      if (!b.imported && !b.gender) errs.gender = 'Choose the gender.';
-      if (!b.imported && b.nationality !== 'Foreign' && !String(b.address || '').trim()) errs.address = 'Enter the address (city, state).';
-      (formState.pays || []).forEach(function (p, i) {
-        if (!(num(p.amount) > 0) || !A.isDate(p.date)) errs['pay' + i] = 'Payment ' + (i + 1) + ': enter the amount and date (or remove the line).';
-        else if (['UPI', 'Card', 'Bank Transfer'].indexOf(p.method) >= 0 && !p.ref) errs['pay' + i] = 'Payment ' + (i + 1) + ': enter the ' + p.method + ' reference.';
-      });
-      var ov = A.overlaps(data.bookings, b);
+      var ov = A.overlaps(data.bookings, b, S());
       if (ov.length && b.status !== 'Cancelled' && !(($('#override') || {}).checked) && A.isActive(b)) errs.override = 'Room already booked for these dates. Tick the override box to save anyway.';
       formState.errors = errs;
       var keys = Object.keys(errs);
@@ -634,29 +783,53 @@
         var first = f.elements[keys[0]]; if (keys[0] !== 'override' && first && first.focus) first.focus(); else (keys[0] === 'override' ? $('#overlap') : $('#errsum')).scrollIntoView({ block: 'center' });
         return;
       }
-      ['adults', 'children'].forEach(function (k) { b[k] = Math.round(num(b[k])); });
-      (b.charges || []).forEach(function (c) { c.amount = r2(c.amount); }); A.applyCharges(b);
+      ['adults', 'children'].forEach(function (k) { b[k] = Math.max(0, Math.round(num(b[k]))); });
+      /* keep only food / service lines with something on them */
+      b.charges = (b.charges || []).filter(function (c) { return num(c.day) > 0 || num(c.amount) || String(c.name || '').trim(); })
+        .map(function (c) { var o = JSON.parse(JSON.stringify(c)); o.amount = r2(o.amount); if (o.qty !== undefined && o.qty !== '') o.qty = r2(o.qty); if (o.rate !== undefined) o.rate = r2(o.rate); if (o.type !== 'Food' && !String(o.name || '').trim()) o.name = 'Other services'; return o; });
+      A.applyCharges(b);
       ['room', 'food', 'additional', 'discount', 'commission', 'gstRoomRate', 'gstFoodRate', 'gstOtherRate', 'cancelFee', 'cancelCommission'].forEach(function (k) { b[k] = r2(b[k]); });
       if (b.couponType) b.couponValue = r2(b.couponValue);
       b.updatedAt = nowISO();
       if (b.status === 'Cancelled' && !b.cancelledOn) b.cancelledOn = today();
       if (b.status !== 'Cancelled') b.cancelledOn = '';
-      b.rooms.forEach(function (r) { r.charge = r2(r.charge); });
-      b.room = A.roomTotal(b); b.roomId = b.rooms[0].roomId;
+      b.rooms = b.rooms.filter(function (r) { return r.roomId; });
+      b.rooms.forEach(function (r) { r.charge = r2(r.charge); if (r.auto !== true) delete r.auto; });
+      b.room = A.roomTotal(b); b.roomId = (b.rooms[0] || {}).roomId || '';
       syncPrimaryGuest(b);
+      var pays = (formState.pays || []).filter(function (p) { return num(p.amount) > 0; });
       if (formState.isNew) {
         b.id = uid(); b.createdAt = nowISO(); b.fbToken = token(); data.bookings.push(b);
         b.no = A.nextBookingNo(data, b.checkIn, S().bookingPrefix);
         if (b.queryId) { var lq = query(b.queryId); if (lq) { lq.status = 'Closed'; lq.outcome = 'Booked'; lq.bookingId = b.id; lq.closedAt = lq.closedAt || nowISO(); lq.updatedAt = nowISO(); } }
-        (formState.pays || []).forEach(function (p) { data.payments.push({ id: uid(), bookingId: b.id, type: 'payment', amount: r2(p.amount), date: p.date, method: p.method, ref: p.ref, createdAt: nowISO(), updatedAt: nowISO() }); });
+        pays.forEach(function (p) { data.payments.push({ id: uid(), bookingId: b.id, type: 'payment', amount: r2(p.amount), date: A.isDate(p.date) ? p.date : today(), method: p.method, ref: p.ref, createdAt: nowISO(), updatedAt: nowISO() }); });
       } else {
         var i = data.bookings.findIndex(function (x) { return x.id === b.id; });
-        data.bookings[i] = b;
+        /* photos added or uploaded while this form was open stay on the booking */
+        if (i >= 0) { A.keepDocs(b, data.bookings[i]); data.bookings[i] = b; } else data.bookings.push(b);
       }
-      save().then(function () { toast('Booking saved'); location.replace('#/guest/' + b.id); });
+      save().then(function () { toast('Booking saved' + (missingBits(b).length ? ' (still to add: ' + missingBits(b).join(', ') + ')' : '')); location.replace('#/guest/' + b.id); });
     };
     var del = $('#del');
     if (del) del.onclick = function () { deleteBooking(formState.b.id); };
+  }
+  function fsCard(b, c) {
+    var BL = A.billLines(b), nf = A.flaggedLines(b).length + (b.bills || []).filter(function (x) { return (x.flags || []).length; }).length;
+    return '<div class="card' + (nf ? ' alertcard' : '') + '"><h3>Food & services</h3>' + (nf ? '<p class="small" style="color:var(--red)">' + nf + ' item' + (nf > 1 ? 's' : '') + ' from a bill photo to check</p>' : '') +
+      (BL.food.length || BL.other.length ? row('Food', inr(c.food)) + row('Services', inr(c.additional)) + (num(c.extrasDiscount) ? row('Food & services discount', '−' + inr(c.extrasDiscount)) : '') : '<p class="small">Nothing yet. Add items by hand or from a photo of the bill.</p>') +
+      '<div class="actions"><a class="btn primary" href="#/fs/' + b.id + '">Open food & services</a><a class="btn" href="#/bill/' + b.id + '/statement">Statement for guest</a></div></div>';
+  }
+  /* Bill rows used on the form and the booking page: rooms with 4D/3N, food per day, services per head and day. */
+  function billRows(b, c) {
+    var st = A.stayLabel(b), BL = A.billLines(b), out = '';
+    if (c.roomParts && c.roomParts.length > 1) out += c.roomParts.map(function (p) { return row('Room — ' + roomName(p.roomId) + (st ? ' (' + st + ')' : ''), inr(p.charge)); }).join('');
+    else out += row('Room charges' + (st ? ' (' + st + ')' : ''), inr(c.room));
+    out += row('Food charges', inr(c.food)) + BL.food.map(function (x) { return row(x.name + (x.date ? ' · ' + fmtShort(x.date) : ''), inr(x.amount), 'sub'); }).join('');
+    out += row('Additional', inr(c.additional)) + BL.other.map(function (x) { return row(x.name + (x.date ? ' · ' + fmtShort(x.date) : ''), inr(x.amount), 'sub'); }).join('');
+    out += row('Discount', '−' + inr(r2(c.discount - num(c.extrasDiscount)))) + (num(c.extrasDiscount) ? row('Food & services discount', '−' + inr(c.extrasDiscount)) : '') + (c.coupon ? row('Coupon ' + c.couponLabel, '−' + inr(c.coupon)) : '');
+    out += row('Taxable value', inr(c.taxable));
+    if (b.gstOn) out += gstByRate(c).map(function (x) { return row('GST rooms @ ' + x.rate + '%', inr(x.gst)); }).join('') + (c.gstFood ? row('GST food @ ' + b.gstFoodRate + '%', inr(c.gstFood)) : '') + (c.gstOther ? row('GST other @ ' + b.gstOtherRate + '%', inr(c.gstOther)) : '');
+    return out;
   }
   function deleteBooking(id) {
     var b = booking(id);
@@ -708,18 +881,17 @@
     if (b.status === 'Confirmed') actions += '<button class="btn primary" data-st="Checked In">Check in</button>';
     if (b.status === 'Checked In') actions += '<button class="btn primary" data-st="Checked Out">Check out</button>';
     var msgs = whatsappTemplates(b, c);
-    var html = '<div class="card hero"><div class="bk-top"><b class="name">' + esc(b.guestName) + '</b><span class="st ' + statusClass(b.status) + '">' + esc(b.status) + '</span></div>' +
-      '<div class="bk-mid">' + esc(roomsLabel(b)) + ' · ' + fmtDate(b.checkIn) + ' → ' + fmtDate(b.checkOut) + ' · ' + c.nights + ' night' + (c.nights === 1 ? '' : 's') + '</div>' +
+    var html = '<div class="card hero"><div class="bk-top"><b class="name">' + esc(gname(b)) + '</b><span class="st ' + statusClass(b.status) + '">' + esc(b.status) + '</span></div>' +
+      '<div class="bk-mid">' + esc(roomsLabel(b)) + ' · ' + (A.isDate(b.checkIn) ? fmtDate(b.checkIn) + ' → ' + fmtDate(b.checkOut) + (A.stayLabel(b) ? ' · ' + A.stayLabel(b) : '') : 'Dates not set') + '</div>' +
       '<div class="bk-mid">' + esc(b.no ? b.no + ' · ' : '') + esc(b.source) + ' · ' + b.adults + ' adult' + (b.adults == 1 ? '' : 's') + (num(b.children) ? ', ' + b.children + ' child' + (b.children == 1 ? '' : 'ren') : '') + '</div>' +
       (b.phone ? '<div class="bk-mid"><a href="tel:' + esc(b.phone) + '">☎ ' + esc(b.phone) + '</a></div>' : '') +
       '<div class="big3"><div><small>Total bill</small><b>' + inr(c.total) + '</b></div><div><small>Received</small><b>' + inr(c.received) + '</b></div><div><small>' + (c.outstanding < 0 ? 'Refund due' : 'Balance') + '</small><b class="' + (c.outstanding > 0 ? 'due' : '') + '">' + inr(Math.abs(c.outstanding)) + '</b></div></div>' +
-      (flag ? '<div class="flag fl-' + flag + '">' + flagLabel(flag) + '</div>' : '') + '</div>' +
+      (flag ? '<div class="flag fl-' + flag + '">' + flagLabel(flag) + '</div>' : '') +
+      (missingBits(b).length ? '<div class="flag fl-pending">Still to add: ' + esc(missingBits(b).join(', ')) + '</div>' : '') + '</div>' +
       '<div class="actions">' + actions + '<a class="btn" href="#/pay/' + b.id + '">Record payment</a><a class="btn" href="#/pay/' + b.id + '/refund">Record refund</a><a class="btn" href="#/edit/' + b.id + '">Edit</a></div>' +
-      guestsCard(b) +
+      guestsCard(b) + fsCard(b, c) +
       '<div class="card"><h3>Bill breakdown</h3>' +
-      (A.isCancelled(b) ? row('Cancellation fee kept', inr(c.cancelFee)) :
-        (c.roomParts && c.roomParts.length > 1 ? c.roomParts.map(function (p) { return row('Room — ' + roomName(p.roomId), inr(p.charge)); }).join('') : row('Room charges', inr(c.room))) + row('Food charges', inr(c.food)) + row('Additional' + (b.additionalNote ? ' (' + b.additionalNote + ')' : ''), inr(c.additional)) + row('Discount', '−' + inr(c.discount)) + (c.coupon ? row('Coupon ' + c.couponLabel, '−' + inr(c.coupon)) : '') +
-        (b.gstOn ? gstByRate(c).map(function (x) { return row('GST rooms @ ' + x.rate + '%', inr(x.gst)); }).join('') + row('GST food @ ' + b.gstFoodRate + '%', inr(c.gstFood)) + (c.gstOther ? row('GST other @ ' + b.gstOtherRate + '%', inr(c.gstOther)) : '') : '')) +
+      (A.isCancelled(b) ? row('Cancellation fee kept', inr(c.cancelFee)) : billRows(b, c)) +
       row('Total bill', inr(c.total), 'strong') + row('Received (payments − refunds)', inr(c.received)) + row(c.outstanding < 0 ? 'Refund due to guest' : 'Outstanding balance', inr(Math.abs(c.outstanding)), 'strong') +
       '<hr>' + row('Platform commission (your expense)', inr(c.commission), 'muted') + row('Net revenue after commission', inr(c.net), 'muted') + '</div>' +
       '<div class="card"><h3>Payments</h3>' + (pays.length ? pays.map(function (p) {
@@ -754,13 +926,14 @@
       row('Rooms', esc(roomsLabel(b))) + row('Created', b.createdAt ? fmtDate(b.createdAt.slice(0, 10)) : '—') +
       row('Google Drive folder', b.driveUrl ? '<a href="' + esc(b.driveUrl) + '" target="_blank" rel="noopener">Open folder ›</a>' : (S().syncUrl ? 'Made at the next sync' : 'Needs Sheet sync')) +
       '<p class="small">Drive: ' + esc(A.driveFolderPath(b).join(' / ')) + '</p></div>' +
+      syncCard() +
       '<button class="btn danger" id="delb">Delete booking</button>';
     return {
       title: 'Guest details', html: html, back: '#/bookings', tab: 'bookings', after: function () {
         $$('[data-st]').forEach(function (btn) {
           btn.onclick = function () {
             var st = btn.dataset.st;
-            if (st === 'Checked Out' && c.outstanding > 0 && !confirm(b.guestName + ' still owes ' + inr(c.outstanding) + '. Check out anyway?')) return;
+            if (st === 'Checked Out' && c.outstanding > 0 && !confirm(gname(b) + ' still owes ' + inr(c.outstanding) + '. Check out anyway?')) return;
             if (st === 'Checked In') {
               var gap = A.guestCountGap(b), miss = A.docsMissing(b), msg = [];
               if (gap) msg.push(gap + ' guest' + (gap > 1 ? 's are' : ' is') + ' not added yet (' + (num(b.adults) + num(b.children)) + ' expected)');
@@ -787,6 +960,7 @@
           deliverFile('arrival-' + b.guestName.replace(/\W+/g, '-') + '.ics', ics([{ uid: b.id, start: icsTime(b.checkIn, 12), end: icsTime(b.checkIn, 13), title: 'Arrival: ' + b.guestName + ' (' + roomsLabel(b) + ')', desc: c.nights + ' nights · ' + b.source + ' · balance ' + inr(c.outstanding) + (b.phone ? ' · ' + b.phone : ''), alarm: '-PT4H' }]), 'text/calendar');
         };
         $('#delb').onclick = function () { deleteBooking(b.id); };
+        bindSyncCard();
         $$('[data-doc]').forEach(function (btn) { btn.onclick = function () { sendDoc(b, btn.dataset.doc, btn); }; });
         $$('[data-msg="review"]').forEach(function (a) { a.addEventListener('click', function () { b.reviewWaAt = nowISO(); b.updatedAt = nowISO(); save(); }); });
         var cs = $('#consent'), cv = $('#consentVia');
@@ -860,13 +1034,17 @@
     if (!gForm || gForm.bid !== b.id || gForm.gid !== (isNew ? 'new' : g0.id)) {
       gForm = { bid: b.id, gid: isNew ? 'new' : g0.id, g: isNew ? { id: 'g-' + uid().slice(0, 12), name: '', type: 'Adult', nationality: 'Indian', idType: S().idTypes[0], docs: [], arrivalTime: '12:00', purpose: 'Tourism', employedIndia: 'No' } : JSON.parse(JSON.stringify(g0)) };
     }
-    var g = gForm.g, s = S(), F = g.nationality === 'Foreign';
+    var g = gForm.g, s = S(), F = g.nationality === 'Foreign', bid = b.id;
+    /* The booking object can be replaced by a sync while this screen is open; always look it up again.
+       (Version 1.6 wrote photos into the old object, so they were "saved" but then lost.) */
+    function liveB() { return booking(bid) || b; }
+    function liveGuest() { return findGuest(liveB(), g.id); }
     function inp(k, label, type, hint, extra) { return field(label, '<input name="' + k + '"' + (type ? ' type="' + type + '"' : '') + ' value="' + esc(g[k] || '') + '"' + (extra || '') + '>', '', hint); }
-    var html = '<div class="card"><b>' + esc(b.guestName) + '</b> · ' + esc(b.no || '') + ' · ' + fmtShort(b.checkIn) + ' → ' + fmtShort(b.checkOut) + '</div>' +
+    var html = '<div class="card"><b>' + esc(gname(b)) + '</b> · ' + esc(b.no || '') + ' · ' + fmtShort(b.checkIn) + ' → ' + fmtShort(b.checkOut) + '</div>' +
       '<form id="gf" class="card" novalidate><h3>' + (isNew ? 'Add guest' : 'Guest') + (g.primary ? ' <span class="tag2">main guest</span>' : '') + '</h3>' +
-      inp('name', 'Full name (as on ID) *', '', g.primary ? 'Changes here also update the booking.' : '', ' autocomplete="off"') +
-      '<div class="three">' + field('Adult / child', '<select name="type">' + options(['Adult', 'Child'], g.type) + '</select>') + field('Gender *', '<select name="gender">' + options(['', 'Male', 'Female', 'Other'], g.gender || '', function (x) { return x || 'Choose'; }) + '</select>') + inp('dob', 'Date of birth', 'date') + '</div>' +
-      '<div class="two">' + field('Nationality', '<select name="nationality">' + options(['Indian', 'Foreign'], g.nationality) + '</select>') + inp('phone', 'Mobile' + (g.primary ? ' *' : ''), 'tel') + '</div>' +
+      inp('name', 'Full name (as on ID)', '', g.primary ? 'Changes here also update the booking.' : '', ' autocomplete="off"') +
+      '<div class="three">' + field('Adult / child', '<select name="type">' + options(['Adult', 'Child'], g.type) + '</select>') + field('Gender', '<select name="gender">' + options(['', 'Male', 'Female', 'Other'], g.gender || '', function (x) { return x || 'Choose'; }) + '</select>') + inp('dob', 'Date of birth', 'date') + '</div>' +
+      '<div class="two">' + field('Nationality', '<select name="nationality">' + options(['Indian', 'Foreign'], g.nationality) + '</select>') + inp('phone', 'Mobile', 'tel') + '</div>' +
       '<div class="fld"><span>Other contact numbers</span><div id="xph"></div><button type="button" class="btn sm" id="addph">＋ Add number</button></div>' +
       '<div id="indBox" class="' + (F ? 'hide' : '') + '"><div class="two">' + field('ID type', '<select name="idType">' + options(s.idTypes, g.idType) + '</select>') + inp('idNumber', 'ID number (full)', '', '', ' autocomplete="off" autocapitalize="characters"') + '</div>' +
       inp('address', 'Address / city, state') + '</div>' +
@@ -913,30 +1091,30 @@
         drawPh();
         function commit(strict) {
           readG(); readPh(); g.phones = g.phones.filter(function (p) { return p.number; });
-          if (!g.name) { $('#gerr').innerHTML = '<div class="warn">Enter the guest’s name first.</div>'; f.elements.name.focus(); return false; }
-          var miss = strict ? A.validateGuest(g, !!g.primary, !!b.imported) : [];
-          if (miss.length) { $('#gerr').innerHTML = '<div class="warn">Please fill in: ' + esc(miss.join(', ')) + '.</div>'; $('#gerr').scrollIntoView({ block: 'center' }); return false; }
-          if (g.passportExpiry && g.passportIssue && g.passportExpiry < g.passportIssue) { $('#gerr').innerHTML = '<div class="warn">Passport expiry is before its issue date.</div>'; return false; }
-          if (!b.guests || !b.guests.length) A.migrateGuests(b);
-          var i = b.guests.findIndex(function (x) { return x.id === g.id; });
+          if (strict && g.passportExpiry && g.passportIssue && g.passportExpiry < g.passportIssue) { $('#gerr').innerHTML = '<div class="warn">Passport expiry is before its issue date.</div>'; return false; }
+          var bk = liveB();
+          if (!bk.guests || !bk.guests.length) A.migrateGuests(bk);
+          var i = bk.guests.findIndex(function (x) { return x.id === g.id; });
           var copy = JSON.parse(JSON.stringify(g));
-          if (i >= 0) b.guests[i] = copy; else b.guests.push(copy);
-          if (g.primary) { b.guestName = g.name; b.phone = g.phone || b.phone; b.nationality = g.nationality; b.country = g.country; b.idType = g.idType; b.idValue = g.idNumber; }
-          b.updatedAt = nowISO(); gForm.gid = g.id;
+          /* keep documents (and their Drive status) that the live record has and this form copy does not */
+          if (i >= 0) { A.keepDocs({ guests: [copy] }, { guests: [bk.guests[i]] }); bk.guests[i] = copy; } else bk.guests.push(copy);
+          g.docs = JSON.parse(JSON.stringify(copy.docs || []));
+          if (g.primary) { bk.guestName = g.name; bk.phone = g.phone || bk.phone; bk.nationality = g.nationality; bk.country = g.country; bk.idType = g.idType; bk.idValue = g.idNumber; }
+          bk.updatedAt = nowISO(); gForm.gid = g.id;
           return true;
         }
-        f.onsubmit = function (ev) { ev.preventDefault(); if (!commit(true)) return; save().then(function () { toast('Guest saved'); gForm = null; location.replace('#/guest/' + b.id); }); };
+        f.onsubmit = function (ev) { ev.preventDefault(); if (!commit(true)) return; save().then(function () { toast('Guest saved'); gForm = null; location.replace('#/guest/' + bid); }); };
         var del = $('#gdel');
         if (del) del.onclick = function () {
           if (!confirm('Remove ' + (g.name || 'this guest') + ' and their documents from this booking? Copies already in Google Drive stay there.')) return;
           liveDocs(g).forEach(function (d) { fileDel(d.id).catch(function () {}); });
-          b.guests = b.guests.filter(function (x) { return x.id !== g.id; }); b.updatedAt = nowISO();
-          save().then(function () { toast('Guest removed'); gForm = null; location.replace('#/guest/' + b.id); });
+          var bk = liveB(); bk.guests = bk.guests.filter(function (x) { return x.id !== g.id; }); bk.updatedAt = nowISO();
+          save().then(function () { toast('Guest removed'); gForm = null; location.replace('#/guest/' + bid); });
         };
         function addFiles(list) {
           if (!list || !list.length) return;
           if (!commit()) return;
-          var kind = $('#dkind').value, files = Array.prototype.slice.call(list), done = 0;
+          var kind = $('#dkind').value, files = Array.prototype.slice.call(list), done = 0, bk = liveB();
           toast('Saving ' + files.length + ' file' + (files.length > 1 ? 's' : '') + '…');
           files.reduce(function (p, file) {
             return p.then(function () {
@@ -944,21 +1122,32 @@
               return compressImage(file).then(function (out) {
                 var id = 'doc-' + uid(), ext = /pdf/.test(file.type) ? 'pdf' : 'jpg';
                 var rec = { id: id, kind: kind, mime: out.blob.type || file.type || 'application/octet-stream', size: out.blob.size, w: out.w, h: out.h, createdAt: nowISO(),
-                  name: A.cleanName((b.no || '') + ' ' + g.name + ' ' + kind + (done ? ' ' + (done + 1) : '')) + '.' + ext, local: true };
-                return filePut(id, out.blob).then(function () { g.docs = g.docs || []; g.docs.push(rec); done++; });
+                  name: A.cleanName((bk.no || '') + ' ' + (g.name || 'Guest') + ' ' + kind + ' ' + id.slice(-4)) + '.' + ext, local: true };
+                /* the photo is stored on the phone first, then recorded on the live booking and saved straight away */
+                return filePut(id, out.blob).then(function () { return fileGet(id); }).then(function (back) {
+                  if (!back) throw new Error('the phone did not keep the photo (storage full?)');
+                  g.docs = g.docs || []; g.docs.push(rec); done++;
+                  commit(); return save();
+                });
               });
             });
           }, Promise.resolve()).then(function () {
-            commit(); return save();
-          }).then(function () { toast(done + ' document' + (done === 1 ? '' : 's') + ' saved'); drawDocs(); })
+            var lg = liveGuest(), have = lg ? liveDocs(lg).length : 0;
+            if (done && have < liveDocs(g).length) throw new Error('the booking did not keep the photo record');
+            toast(done + ' document' + (done === 1 ? '' : 's') + ' saved on this device' + (S().syncUrl ? ' · copying to Drive…' : ''));
+            drawDocs();
+          })
             .catch(function (e) { toast('Could not save the photo: ' + e.message, true); });
         }
         $('#dcam').onchange = function () { addFiles(this.files); this.value = ''; };
         $('#dup').onchange = function () { addFiles(this.files); this.value = ''; };
         function drawDocs() {
-          var docs = liveDocs(g), box = $('#docs');
+          var lg = liveGuest(); if (lg) g.docs = JSON.parse(JSON.stringify(lg.docs || []));
+          var docs = liveDocs(g), box = $('#docs'); if (!box) return;
+          var waiting = docs.filter(function (d) { return !d.driveId; }).length;
           if (!docs.length) { box.innerHTML = '<p class="small">No documents yet.</p>'; return; }
-          box.innerHTML = docs.map(function (d) {
+          box.innerHTML = (waiting && data.meta.lastUploadError ? '<div class="warn">Last Drive upload failed: ' + esc(data.meta.lastUploadError) + '. It retries at the next sync (tap Sync now).</div>' : '') +
+            (waiting && !S().syncUrl ? '<div class="warn">Cloud sync is not set up, so photos stay on this device only.</div>' : '') + docs.map(function (d) {
             return '<div class="doc" data-doc="' + d.id + '"><div class="thumb" id="t-' + d.id + '">' + (/pdf/.test(d.mime) ? '<span>PDF</span>' : '<span>…</span>') + '</div>' +
               '<div class="dmeta"><b>' + esc(d.kind) + '</b><small>' + (d.driveId ? 'In Drive ✓' : 'Uploads at next sync') + '</small></div>' +
               '<div class="dact">' + (d.local !== false ? '<button type="button" class="btn sm" data-view="' + d.id + '">View</button><button type="button" class="btn sm" data-share="' + d.id + '">Share</button>' : '') +
@@ -980,14 +1169,18 @@
               if (!confirm('Delete this document?' + ' It is also removed from Google Drive at the next sync.')) return;
               var d = (g.docs || []).filter(function (y) { return y.id === x.dataset.deldoc; })[0];
               d.deleted = true; d.deletedAt = nowISO(); fileDel(d.id).catch(function () {});
+              var lg2 = liveGuest(), ld = lg2 && (lg2.docs || []).filter(function (y) { return y.id === d.id; })[0];
+              if (ld) { ld.deleted = true; ld.deletedAt = d.deletedAt; }
               commit(); save().then(function () { toast('Document deleted'); drawDocs(); });
             };
           });
         }
         drawDocs();
+        docsRedraw = drawDocs;
       }
     };
   };
+  var docsRedraw = null;
 
   /* Form C helper: every field in the portal's order with a Copy button. */
   function formCFields(b, g) {
@@ -1054,6 +1247,180 @@
     };
   };
 
+  /* ---------- FOOD & SERVICES (day-wise detail, bill photos, statement) ---------- */
+  var MEAL_OPTS = ['Breakfast', 'Lunch', 'Snacks', 'Dinner', 'Other'];
+  var fsScan = null, fsTimer = null;
+  function menuList() { return A.menuOf(S()); }
+  function menuEntry(id) { if (String(id).indexOf('svc:') === 0) { var n = id.slice(4), v = (S().services || []).filter(function (x) { return x.name === n; })[0]; return v ? { id: id, name: v.name, price: num(v.rate) || null, type: 'Other', unit: '' } : null; } var m = menuList().filter(function (x) { return x.id === id; })[0]; return m ? { id: m.id, name: m.name, price: m.price, type: 'Food', unit: m.unit || '' } : null; }
+  function itemOptions(sel) {
+    var cats = [], by = {};
+    menuList().forEach(function (m) { if (!by[m.cat]) { by[m.cat] = []; cats.push(m.cat); } by[m.cat].push(m); });
+    var h = '<option value="">— Choose from the menu —</option>' + cats.map(function (c) { return '<optgroup label="' + esc(c) + '">' + by[c].map(function (m) { return '<option value="' + esc(m.id) + '"' + (m.id === sel ? ' selected' : '') + '>' + esc(m.name) + (m.price != null ? ' · ₹' + m.price + (m.unit ? '/' + m.unit : '') : ' · MRP') + '</option>'; }).join('') + '</optgroup>'; }).join('');
+    var sv = (S().services || []).filter(function (v) { return v.name; });
+    if (sv.length) h += '<optgroup label="Services">' + sv.map(function (v) { var id = 'svc:' + v.name; return '<option value="' + esc(id) + '"' + (id === sel ? ' selected' : '') + '>' + esc(v.name) + (num(v.rate) ? ' · ₹' + num(v.rate) : '') + '</option>'; }).join('') + '</optgroup>';
+    return h + '<option value="__custom"' + (sel === '__custom' ? ' selected' : '') + '>Not on the menu (type it)</option>';
+  }
+  routes.fs = function (id) {
+    var b = booking(id);
+    if (!b) return { title: 'Not found', html: empty('This booking no longer exists.'), back: '#/bookings', tab: 'bookings' };
+    var bid = b.id; function liveB() { return booking(bid) || b; }
+    b.charges = b.charges && b.charges.length ? b.charges : A.chargeLines(b).map(function (x) { return JSON.parse(JSON.stringify(x)); });
+    b.charges.forEach(function (c) { if (!c.id) c.id = 'c-' + uid().slice(0, 10); });
+    var D = A.stayDays(b), c = calc(b), fl = A.flaggedLines(b), s = S();
+    function lineRow(cl) {
+      var isItem = cl.kind === 'item', flags = cl.flags || [], custom = isItem && (!cl.item || cl.custom);
+      var head = isItem ? '<select data-f="item" aria-label="Item">' + itemOptions(custom ? '__custom' : cl.item) + '</select>' + (custom ? '<input data-f="name" value="' + esc(cl.name || '') + '" placeholder="What was it?">' : '')
+        : '<span class="fsname">' + esc(cl.type === 'Food' && cl.meal && !cl.kind ? cl.meal + ' (per person)' : (cl.name || (cl.type === 'Food' ? 'Food & beverages' : 'Other services'))) + '</span>';
+      return '<div class="fsl' + (flags.length ? ' flagged' : '') + '" data-id="' + esc(cl.id) + '">' + '<div class="fsh">' + head + '</div>' +
+        '<div class="fsn"><label><small>Qty' + (cl.unit ? ' (' + esc(cl.unit) + ')' : '') + '</small><input data-f="qty" type="number" inputmode="decimal" min="0" step="any" value="' + esc(cl.qty != null ? cl.qty : 1) + '"' + (flags.indexOf('qty') >= 0 ? ' class="bad"' : '') + '></label>' +
+        '<label><small>Rate ₹</small><input data-f="rate" type="number" inputmode="decimal" min="0" step="any" value="' + esc(cl.rate != null ? cl.rate : '') + '"' + (flags.indexOf('price') >= 0 ? ' class="bad"' : '') + '></label>' +
+        '<label><small>Amount ₹</small><input data-f="amount" type="number" inputmode="decimal" min="0" step="any" value="' + esc(cl.amount) + '"' + (flags.indexOf('math') >= 0 || flags.indexOf('price') >= 0 ? ' class="bad"' : '') + '></label>' +
+        '<button type="button" class="x" data-f="del" aria-label="Remove line">−</button></div>' +
+        '<div class="fsm">' + (cl.type === 'Food' ? '<select data-f="meal" aria-label="Meal">' + options(MEAL_OPTS, cl.meal || 'Other') + '</select>' : '<span class="small">Service</span>') +
+        '<select data-f="day" aria-label="Day"' + (flags.indexOf('day') >= 0 ? ' class="bad"' : '') + '>' + (flags.indexOf('day') >= 0 || !(num(cl.day) > 0) ? '<option value="0">' + (flags.indexOf('day') >= 0 ? 'Choose the day' : 'Whole stay') + '</option>' : '') +
+        Array.apply(null, Array(D)).map(function (_, i) { return '<option value="' + (i + 1) + '"' + (num(cl.day) === i + 1 ? ' selected' : '') + '>Day ' + (i + 1) + '</option>'; }).join('') + '</select>' +
+        (cl.billId ? '<span class="small">from bill photo' + (cl.raw ? ': “' + esc(cl.raw) + '”' : '') + '</span>' : '') + '</div>' +
+        (flags.length ? '<div class="fsflags">' + flags.map(function (f) { return '<div>⚠ ' + esc(A.flagText(cl, f)) + '</div>'; }).join('') + '<button type="button" class="btn sm" data-f="ok">✓ Looks right</button></div>' : '') + '</div>';
+    }
+    function dayCard(d, lines) {
+      var tot = A.sum(lines, function (x) { return x.amount; });
+      return '<div class="card fsday" data-day="' + d + '"><div class="fsdh"><h3>' + (d > 0 ? 'Day ' + d + (A.dayDate(b, d) ? ' · ' + esc(A.fmtLong(A.dayDate(b, d))) : '') : (lines.some(function (x) { return (x.flags || []).indexOf('day') >= 0; }) ? 'Day not set' : 'Whole stay')) + '</h3><b data-dt="' + d + '">' + inr(tot) + '</b></div>' +
+        (lines.length ? lines.map(lineRow).join('') : '<p class="small">Nothing yet.</p>') +
+        '<div class="actions"><button type="button" class="btn sm" data-add="' + d + '">＋ Add item</button></div></div>';
+    }
+    var groups = {}; for (var d = 1; d <= D; d++) groups[d] = [];
+    b.charges.forEach(function (cl) { var k = num(cl.day) > 0 && num(cl.day) <= D ? Math.round(num(cl.day)) : 0; (groups[k] = groups[k] || []).push(cl); });
+    var bills = (b.bills || []).filter(function (x) { return (x.flags || []).length; });
+    var html = '<div class="card hero"><div class="bk-top"><b class="name">' + esc(gname(b)) + '</b><span class="st ' + statusClass(b.status) + '">' + esc(b.status) + '</span></div>' +
+      '<div class="bk-mid">' + esc(roomsLabel(b)) + ' · ' + (A.isDate(b.checkIn) ? fmtShort(b.checkIn) + ' → ' + fmtShort(b.checkOut) + ' · ' + A.stayLabel(b) : 'Dates not set') + '</div>' +
+      '<div class="big3"><div><small>Food</small><b id="fsF">' + inr(c.food) + '</b></div><div><small>Services</small><b id="fsO">' + inr(c.additional) + '</b></div><div><small>To check</small><b class="' + (fl.length || bills.length ? 'due' : '') + '" id="fsC">' + (fl.length + bills.length) + '</b></div></div></div>' +
+      (!D ? '<div class="warn">Set check-in and check-out on the booking to get the days.</div>' : '') +
+      bills.map(function (x) { return '<div class="warn fsbill"><b>Bill photo of ' + esc(fmtShort(String(x.at || '').slice(0, 10))) + ':</b> ' + (x.flags.indexOf('total') >= 0 ? 'total written on the bill is ' + inr(x.total) + ' but the lines read add up to ' + inr(x.sum) + '. A line may be missing or misread.' : 'nothing could be read. Add the items by hand.') + ' <button type="button" class="btn sm" data-billok="' + esc(x.id) + '">✓ Checked</button></div>'; }).join('') +
+      '<div class="card"><h3>Add from a bill photo</h3><p class="small">Take a clear photo of the handwritten bill (flat, good light). It is read by Google (free, in your own Google account), matched to your menu, and added to the day. Anything not read for sure is marked in red to fix. Needs internet and Sheet sync.</p>' +
+      '<div class="two">' + field('Bill is for', '<select id="scanDay"><option value="0">Read the day from the bill</option>' + Array.apply(null, Array(D)).map(function (_, i) { return '<option value="' + (i + 1) + '">Day ' + (i + 1) + (A.dayDate(b, i + 1) ? ' · ' + fmtShort(A.dayDate(b, i + 1)) : '') + '</option>'; }).join('') + '</select>') +
+      field('Meal', '<select id="scanMeal"><option value="">Read from the bill</option>' + options(MEAL_OPTS, '') + '</select>') + '</div>' +
+      '<div class="actions"><label class="btn primary filebtn">📷 Photo of bill<input type="file" id="bcam" accept="image/*" capture="environment"></label><label class="btn filebtn">⬆ Upload bill photo<input type="file" id="bup" accept="image/*"></label></div><div id="scanBox"></div></div>' +
+      Object.keys(groups).map(Number).sort(function (x, y) { return (x || 99) - (y || 99); }).filter(function (k) { return k > 0 || groups[k].length; }).map(function (k) { return dayCard(k, groups[k]); }).join('') +
+      '<div class="card"><h3>Statement for the guest</h3>' +
+      field('Discount on food & services ₹', '<input id="exd" type="number" inputmode="decimal" min="0" step="any" value="' + esc(b.extrasDiscount || '') + '">', '', 'Only if the guest insists. Comes off food and services before GST, and the tax invoice shows the same.') +
+      '<label class="chk"><input type="checkbox" id="stg"' + (b.stmtGst ? ' checked' : '') + (b.gstOn ? '' : ' disabled') + '> Show GST on the statement' + (b.gstOn ? '' : ' (GST is off for this booking)') + '</label>' +
+      '<div class="calcbox" id="fsTot"></div>' +
+      '<div class="actions"><a class="btn" href="#/bill/' + bid + '/statement">View statement</a><button class="btn primary" data-doc="statement">Send statement (PDF)</button></div>' +
+      '<p class="small">Send opens your share menu with the PDF attached (WhatsApp, email…). Needs internet and Sheet sync.</p></div>' + syncCard();
+    return {
+      title: 'Food & services', back: '#/guest/' + bid, tab: 'bookings', html: html, after: function () {
+        function findLine(lid) { return (liveB().charges || []).filter(function (x) { return x.id === lid; })[0]; }
+        function drop(cl, fs) { cl.flags = (cl.flags || []).filter(function (f) { return fs.indexOf(f) < 0; }); if (!cl.flags.length) delete cl.flags; }
+        function totals() {
+          var bk = liveB(); A.applyCharges(bk); var cc = calc(bk);
+          $('#fsF').textContent = inr(cc.food); $('#fsO').textContent = inr(cc.additional);
+          var nf = A.flaggedLines(bk).length + (bk.bills || []).filter(function (x) { return (x.flags || []).length; }).length; $('#fsC').textContent = nf; $('#fsC').classList.toggle('due', !!nf);
+          $$('[data-dt]').forEach(function (el) { var d = +el.dataset.dt; el.textContent = inr(A.sum((bk.charges || []).filter(function (x) { var k = num(x.day) > 0 && num(x.day) <= A.stayDays(bk) ? Math.round(num(x.day)) : 0; return k === d; }), function (x) { return x.amount; })); });
+          var withG = bk.stmtGst && bk.gstOn;
+          $('#fsTot').innerHTML = row('Food & services', inr(r2(cc.food + cc.additional))) + (cc.extrasDiscount ? row('Less: discount', '−' + inr(cc.extrasDiscount)) : '') +
+            (withG ? row('GST food', inr(cc.gstFood)) + (cc.gstOther ? row('GST services', inr(cc.gstOther)) : '') + row('Statement total', inr(r2(cc.foodTaxable + cc.otherTaxable + cc.gstFood + cc.gstOther)), 'strong') : row('Statement total' + (bk.gstOn ? ' (before GST)' : ''), inr(r2(cc.foodTaxable + cc.otherTaxable)), 'strong'));
+        }
+        function later(redraw) { var bk = liveB(); A.applyCharges(bk); bk.updatedAt = nowISO(); totals(); clearTimeout(fsTimer); fsTimer = setTimeout(function () { save(); }, 700); if (redraw) { save().then(function () { render(); }); clearTimeout(fsTimer); } }
+        totals();
+        $$('.fsl').forEach(function (row0) {
+          var lid = row0.dataset.id;
+          $$('[data-f]', row0).forEach(function (el) {
+            var f = el.dataset.f;
+            if (f === 'del') { el.onclick = function () { var bk = liveB(); bk.charges = bk.charges.filter(function (x) { return x.id !== lid; }); later(true); }; return; }
+            if (f === 'ok') { el.onclick = function () { var cl = findLine(lid); if (cl) { delete cl.flags; later(true); } }; return; }
+            el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', function () {
+              var cl = findLine(lid); if (!cl) return;
+              if (f === 'item') {
+                if (el.value === '__custom') { cl.custom = true; cl.item = ''; drop(cl, ['item']); return later(true); }
+                var me = menuEntry(el.value); if (!me) return;
+                /* learn the written word so the next bill matches it straight away */
+                if (cl.read && (cl.flags || []).indexOf('item') >= 0 && me.type === 'Food') { var mm = (S().menu || []).filter(function (x) { return x.id === me.id; })[0]; if (mm) { mm.aliases = mm.aliases || []; if (mm.aliases.indexOf(cl.read) < 0) mm.aliases.push(cl.read); } }
+                cl.item = me.id; cl.custom = false; cl.name = me.name; cl.type = me.type; cl.unit = me.unit; cl.menuPrice = me.price;
+                if (me.price != null) { cl.rate = me.price; cl.amount = r2(num(cl.qty || 1) * me.price); drop(cl, ['item', 'price', 'math']); } else drop(cl, ['item']);
+                return later(true);
+              }
+              if (f === 'name') { cl.name = el.value.trim(); return later(); }
+              if (f === 'meal') { cl.meal = el.value; return later(); }
+              if (f === 'day') { cl.day = +el.value; if (+el.value > 0) drop(cl, ['day']); return later(true); }
+              if (f === 'qty') { cl.qty = el.value === '' ? '' : r2(el.value); cl.amount = r2(num(el.value) * num(cl.rate)); var a = $('[data-f="amount"]', row0); if (a) a.value = cl.amount; drop(cl, ['qty', 'math']); }
+              if (f === 'rate') { cl.rate = el.value === '' ? '' : r2(el.value); cl.amount = r2(num(cl.qty || 1) * num(el.value)); var a2 = $('[data-f="amount"]', row0); if (a2) a2.value = cl.amount; drop(cl, ['price', 'math']); }
+              if (f === 'amount') { cl.amount = r2(el.value); drop(cl, ['price', 'math']); }
+              el.classList.remove('bad'); later();
+            });
+          });
+        });
+        $$('[data-add]').forEach(function (btn) {
+          btn.onclick = function () {
+            var bk = liveB(), d = +btn.dataset.add;
+            bk.charges = bk.charges || []; bk.charges.push({ id: 'c-' + uid().slice(0, 10), kind: 'item', type: 'Food', day: d, meal: 'Lunch', item: '', name: '', qty: 1, rate: '', amount: 0, flags: ['item'] });
+            later(true);
+          };
+        });
+        $$('[data-billok]').forEach(function (btn) { btn.onclick = function () { var x = (liveB().bills || []).filter(function (y) { return y.id === btn.dataset.billok; })[0]; if (x) { x.flags = []; later(true); } }; });
+        $('#exd').oninput = function () { liveB().extrasDiscount = r2(this.value); var e = A.validateBooking(liveB(), S()).extrasDiscount; if (e) { toast(e, true); liveB().extrasDiscount = 0; } later(); };
+        $('#stg').onchange = function () { liveB().stmtGst = this.checked; later(); };
+        $$('[data-doc]').forEach(function (btn) { btn.onclick = function () { clearTimeout(fsTimer); save().then(function () { sendDoc(liveB(), 'statement', btn); }); }; });
+        bindSyncCard();
+
+        /* ---- bill photo → text (Sheet / Google Drive OCR) → lines ---- */
+        function scanFile(file, lang) {
+          var bk = liveB();
+          $('#scanBox').innerHTML = '<p class="small">Saving the photo…</p>';
+          compressImage(file).then(function (out) {
+            var did = 'bill-' + uid(), rec = { id: did, kind: 'Food bill', mime: out.blob.type || 'image/jpeg', size: out.blob.size, w: out.w, h: out.h, createdAt: nowISO(), name: A.cleanName((bk.no || '') + ' food bill ' + today() + ' ' + did.slice(-4)) + '.jpg', local: true };
+            return filePut(did, out.blob).then(function () { bk = liveB(); bk.billDocs = bk.billDocs || []; bk.billDocs.push(rec); bk.updatedAt = nowISO(); return save(true); }).then(function () { return readBill(did, out.blob, lang || 'hi'); });
+          }).catch(function (e) { $('#scanBox').innerHTML = '<div class="warn">Could not save the photo: ' + esc(e.message || e) + '</div>'; });
+        }
+        function readBill(did, blob, lang) {
+          var st = S();
+          if (!st.syncUrl || !st.syncToken) { $('#scanBox').innerHTML = '<div class="warn">Photo saved. Reading needs Cloud sync (More → Settings). Add the items by hand below.</div>'; return; }
+          if (!navigator.onLine) { $('#scanBox').innerHTML = '<div class="warn">Photo saved. You are offline: add the items by hand, or try the photo again with internet.</div>'; return; }
+          $('#scanBox').innerHTML = '<p class="small">Reading the bill… (about 10 seconds)</p>';
+          return toB64(blob).then(function (b64) {
+            return fetch(st.syncUrl, { method: 'POST', redirect: 'follow', body: JSON.stringify({ token: st.syncToken, action: 'ocr', bookingId: bid, docId: did, mime: blob.type || 'image/jpeg', lang: lang, data: b64 }) }).then(function (r) { return r.text(); });
+          }).then(function (t) {
+            var j; try { j = JSON.parse(t); } catch (e) { throw new Error('Unexpected reply from Google. Update Code.gs to version 1.8 and deploy a new version.'); }
+            if (!j.ok) throw new Error(j.error || 'Could not read the bill');
+            var res = A.parseBill(j.text, liveB(), S(), { day: +$('#scanDay').value, meal: $('#scanMeal').value });
+            fsScan = { did: did, blob: blob, lang: lang, text: j.text, res: res };
+            review();
+          }).catch(function (e) { $('#scanBox').innerHTML = '<div class="warn">' + esc(e.message || e) + ' The photo is saved; add the items by hand below.</div>'; });
+        }
+        function review() {
+          var res = fsScan.res, bk = liveB(), ls = res.lines, bad = ls.filter(function (l) { return l.flags.length; }).length;
+          var days = []; ls.forEach(function (l) { if (l.day && days.indexOf(l.day) < 0) days.push(l.day); });
+          var busy = days.filter(function (d) { return (bk.charges || []).some(function (x) { return num(x.day) === d && num(x.amount); }); });
+          var h = '<div class="ok">Read ' + ls.length + ' line' + (ls.length === 1 ? '' : 's') + (days.length ? ' for ' + days.map(function (d) { return 'Day ' + d; }).join(', ') : '') + ' · ' + inr(res.sum) + (bad ? ' · <b style="color:var(--red)">' + bad + ' to check</b>' : '') + '</div>' +
+            (res.flags.indexOf('total') >= 0 ? '<div class="warn">The bill total is ' + inr(res.total) + ' but the lines read add up to ' + inr(res.sum) + '.</div>' : '') +
+            (res.flags.indexOf('empty') >= 0 ? '<div class="warn">No items could be read from this photo.</div>' : '') +
+            '<div class="scanlist">' + ls.map(function (l) { return '<div class="' + (l.flags.length ? 'bad' : '') + '"><span>' + (l.day ? 'D' + l.day + ' · ' : '') + esc(l.name) + ' × ' + l.qty + '</span><b>' + inr(l.amount) + '</b></div>'; }).join('') + '</div>' +
+            busy.map(function (d) { var have = A.sum((bk.charges || []).filter(function (x) { return num(x.day) === d; }), function (x) { return x.amount; }); return '<div class="fld choose" data-busy="' + d + '"><span>Day ' + d + ' already has ' + inr(have) + ' of food & services. What should this bill do?</span><label class="chk"><input type="radio" name="busy' + d + '" value="replace"> Replace what is on Day ' + d + '</label><label class="chk"><input type="radio" name="busy' + d + '" value="add"> Add on top</label></div>'; }).join('') +
+            '<div class="actions"><button type="button" class="btn primary" id="scanAdd"' + (ls.length ? '' : ' disabled') + '>Add to the booking</button><button type="button" class="btn" id="scanEn">Read again (English)</button><button type="button" class="btn" id="scanHi">Read again (Hindi)</button><button type="button" class="btn" id="scanX">Cancel</button></div>' +
+            '<details class="fld"><summary>What Google read</summary><pre class="ocr">' + esc(fsScan.text) + '</pre></details>';
+          $('#scanBox').innerHTML = h;
+          $('#scanEn').onclick = function () { readBill(fsScan.did, fsScan.blob, 'en'); };
+          $('#scanHi').onclick = function () { readBill(fsScan.did, fsScan.blob, 'hi'); };
+          $('#scanX').onclick = function () { fsScan = null; $('#scanBox').innerHTML = '<p class="small">Cancelled. The photo stays saved with the booking.</p>'; };
+          $('#scanAdd').onclick = function () {
+            var choice = {}, missing = [];
+            busy.forEach(function (d) { var x = $('input[name="busy' + d + '"]:checked'); if (x) choice[d] = x.value; else missing.push(d); });
+            if (missing.length) return toast('Choose Replace or Add on top for Day ' + missing.join(', Day '), true);
+            var bk2 = liveB(), billId = 'bl-' + uid().slice(0, 10);
+            bk2.charges = (bk2.charges || []).filter(function (x) { return !(choice[num(x.day)] === 'replace'); });
+            res.lines.forEach(function (l) {
+              bk2.charges.push({ id: 'c-' + uid().slice(0, 10), kind: 'item', type: l.type, day: l.day || 0, meal: l.type === 'Food' ? l.meal : '', item: l.item, name: l.name, unit: l.unit, qty: l.qty, rate: l.rate, amount: l.amount, menuPrice: l.menuPrice, read: l.read, raw: l.raw, billId: billId, flags: l.flags.slice() });
+            });
+            bk2.bills = bk2.bills || []; bk2.bills.push({ id: billId, docId: fsScan.did, at: nowISO(), lang: fsScan.lang, total: res.total, sum: res.sum, flags: res.flags.filter(function (f) { return f === 'total' || f === 'empty'; }) });
+            fsScan = null; A.applyCharges(bk2); bk2.updatedAt = nowISO();
+            save().then(function () { toast('Bill added' + (bad ? ': fix the lines in red' : '')); render(); });
+          };
+        }
+        $('#bcam').onchange = function () { if (this.files[0]) scanFile(this.files[0]); this.value = ''; };
+        $('#bup').onchange = function () { if (this.files[0]) scanFile(this.files[0]); this.value = ''; };
+      }
+    };
+  };
+
   /* ---------- RECORD PAYMENT / REFUND ---------- */
   routes.pay = function (arg) {
     var parts = arg.split('/'), b = booking(parts[0]), refund = parts[1] === 'refund';
@@ -1062,19 +1429,17 @@
     var suggested = refund ? Math.max(-c.outstanding, 0) : Math.max(c.outstanding, 0);
     var html = '<div class="card"><b>' + esc(b.guestName) + '</b> · ' + esc(roomsLabel(b)) + '<div class="big3"><div><small>Bill</small><b>' + inr(c.total) + '</b></div><div><small>Received</small><b>' + inr(c.received) + '</b></div><div><small>Balance</small><b>' + inr(c.outstanding) + '</b></div></div></div>' +
       '<form id="pf" class="card" novalidate><h3>' + (refund ? 'Refund to guest' : 'Payment received') + '</h3>' +
-      field('Amount ₹ *', '<input name="amount" type="number" inputmode="decimal" min="0" step="any" value="' + (suggested ? suggested : '') + '" required>') +
-      '<div class="two">' + field('Date *', '<input name="date" type="date" value="' + today() + '">') +
+      field('Amount ₹', '<input name="amount" type="number" inputmode="decimal" min="0" step="any" value="' + (suggested ? suggested : '') + '">') +
+      '<div class="two">' + field('Date', '<input name="date" type="date" value="' + today() + '">') +
       field('Method', '<select name="method">' + options(A.METHODS, refund ? 'UPI' : (b.source !== 'Direct Booking' && !c.received ? 'Online Platform' : 'UPI')) + '</select>') + '</div>' +
-      field('Transaction reference', '<input name="ref" placeholder="Needed for UPI, card and bank transfer">') +
+      field('Transaction reference', '<input name="ref" placeholder="UPI / card / bank reference (optional)">') +
       '<div id="perr"></div><button class="btn primary big" type="submit">Save ' + (refund ? 'refund' : 'payment') + '</button></form>';
     return {
       title: refund ? 'Record refund' : 'Record payment', html: html, back: '#/guest/' + b.id, tab: 'bookings', after: function () {
         $('#pf').onsubmit = function (ev) {
           ev.preventDefault();
-          var f = this, amt = r2(f.elements.amount.value), d = f.elements.date.value;
-          if (!(amt > 0)) return ($('#perr').innerHTML = '<div class="warn">Enter an amount greater than ₹0.</div>');
-          if (!A.isDate(d)) return ($('#perr').innerHTML = '<div class="warn">Choose a date.</div>');
-          if (['UPI', 'Card', 'Bank Transfer'].indexOf(f.elements.method.value) >= 0 && !f.elements.ref.value.trim()) return ($('#perr').innerHTML = '<div class="warn">Enter the ' + esc(f.elements.method.value) + ' transaction reference.</div>');
+          var f = this, amt = r2(f.elements.amount.value), d = A.isDate(f.elements.date.value) ? f.elements.date.value : today();
+          if (!(amt > 0)) return ($('#perr').innerHTML = '<div class="warn">Enter the amount ' + (refund ? 'refunded' : 'received') + ' (that is the payment itself, so it cannot be left empty).</div>');
           if (!refund && amt > c.outstanding + 0.005 && !confirm('This is more than the balance of ' + inr(c.outstanding) + '. Save anyway?')) return;
           data.payments.push({ id: uid(), bookingId: b.id, type: refund ? 'refund' : 'payment', amount: amt, date: d, method: f.elements.method.value, ref: f.elements.ref.value.trim(), createdAt: nowISO(), updatedAt: nowISO() });
           b.updatedAt = nowISO();
@@ -1121,8 +1486,8 @@
   function queryForm(q, isNew) {
     var s = S();
     var html = '<form id="qf" class="card" novalidate><h3>' + (isNew ? 'New query' : 'Edit query') + '</h3>' +
-      field('Guest name *', '<input name="name" value="' + esc(q.name) + '" autocomplete="off">') +
-      '<div class="two">' + field('Mobile *', '<input name="phone" type="tel" inputmode="tel" value="' + esc(q.phone) + '">') + field('Email', '<input name="email" type="email" value="' + esc(q.email) + '">') + '</div>' +
+      field('Guest name', '<input name="name" value="' + esc(q.name) + '" autocomplete="off">') +
+      '<div class="two">' + field('Mobile', '<input name="phone" type="tel" inputmode="tel" value="' + esc(q.phone) + '">') + field('Email', '<input name="email" type="email" value="' + esc(q.email) + '">') + '</div>' +
       '<div class="two">' + field('Channel', '<select name="channel">' + options(s.sources, q.channel) + '</select>') + field('Received on', '<input name="date" type="date" value="' + esc(q.date) + '">') + '</div>' +
       '<div class="two">' + field('Check-in (if given)', '<input name="checkIn" type="date" value="' + esc(q.checkIn) + '">') + field('Check-out', '<input name="checkOut" type="date" value="' + esc(q.checkOut) + '">') + '</div>' +
       '<div class="three">' + field('Adults', '<input name="adults" type="number" inputmode="numeric" min="1" value="' + esc(q.adults) + '">') + field('Children', '<input name="children" type="number" inputmode="numeric" min="0" value="' + esc(q.children) + '">') +
@@ -1141,9 +1506,9 @@
         f.onsubmit = function (ev) {
           ev.preventDefault();
           ['name', 'phone', 'email', 'channel', 'date', 'checkIn', 'checkOut', 'roomId', 'message', 'notes', 'status', 'outcome', 'lostReason'].forEach(function (k) { q[k] = String(f.elements[k].value || '').trim(); });
-          q.adults = Math.max(1, Math.round(num(f.elements.adults.value) || 1)); q.children = Math.max(0, Math.round(num(f.elements.children.value)));
+          q.adults = Math.max(0, Math.round(num(f.elements.adults.value))); q.children = Math.max(0, Math.round(num(f.elements.children.value)));
           q.quote = r2(f.elements.quote.value);
-          var err = !q.name ? 'Enter the guest name.' : String(q.phone).replace(/\D/g, '').length < 10 ? 'Enter the mobile number (10+ digits).' : (q.checkIn && q.checkOut && A.nights(q.checkIn, q.checkOut) < 1 ? 'Check-out must be after check-in.' : (q.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(q.email) ? 'Check the email address.' : ''));
+          var err = q.checkIn && q.checkOut && A.nights(q.checkIn, q.checkOut) < 1 ? 'Check-out must be after check-in.' : '';
           if (err) { $('#qerr').innerHTML = '<div class="warn">' + esc(err) + '</div>'; return; }
           if (q.status !== 'Closed') q.outcome = '';
           if (q.status === 'Answered' && !q.answeredAt) q.answeredAt = nowISO();
@@ -1159,7 +1524,7 @@
         };
         var d = $('#qdel');
         if (d) d.onclick = function () {
-          if (!confirm('Delete this query for ' + q.name + '? This cannot be undone.' + (q.bookingId ? ' Its booking stays.' : ''))) return;
+          if (!confirm('Delete this query for ' + gname(q) + '? This cannot be undone.' + (q.bookingId ? ' Its booking stays.' : ''))) return;
           data.queries = data.queries.filter(function (x) { return x.id !== q.id; });
           save().then(function () { toast('Query deleted'); location.replace('#/queries'); });
         };
@@ -1207,7 +1572,7 @@
     var q = query(id);
     if (!q) return { title: 'Not found', html: empty('This query no longer exists.'), back: '#/queries', tab: 'queries' };
     var b = q.bookingId ? booking(q.bookingId) : null;
-    var html = '<div class="card hero"><div class="bk-top"><b class="name">' + esc(q.name) + '</b><span class="st ' + (q.status === 'Open' ? 'st-cancelled' : q.status === 'Answered' ? 'st-confirmed' : (q.outcome === 'Booked' ? 'st-checked-in' : 'st-checked-out')) + '">' + esc(q.status + (q.status === 'Closed' ? ' · ' + (q.outcome || '') : '')) + '</span></div>' +
+    var html = '<div class="card hero"><div class="bk-top"><b class="name">' + esc(gname(q)) + '</b><span class="st ' + (q.status === 'Open' ? 'st-cancelled' : q.status === 'Answered' ? 'st-confirmed' : (q.outcome === 'Booked' ? 'st-checked-in' : 'st-checked-out')) + '">' + esc(q.status + (q.status === 'Closed' ? ' · ' + (q.outcome || '') : '')) + '</span></div>' +
       '<div class="bk-mid">' + esc(q.channel) + ' · received ' + fmtDate(A.queryDate(q)) + '</div>' +
       '<div class="bk-mid">' + (A.isDate(q.checkIn) ? fmtDate(q.checkIn) + ' → ' + fmtDate(q.checkOut) : 'Dates not given') + ' · ' + q.adults + ' adult(s)' + (num(q.children) ? ', ' + q.children + ' child(ren)' : '') + (q.roomId ? ' · ' + esc(roomName(q.roomId)) : '') + '</div>' +
       (num(q.quote) ? '<div class="bk-mid">Quoted ' + inr(q.quote) + '</div>' : '') +
@@ -1220,7 +1585,7 @@
       couponCard(q) +
       '<div class="card"><h3>Send</h3><div class="actions">' + (q.phone ? queryMessages(q).map(function (m) { return '<a class="btn wa" data-qmsg="' + m.key + '" target="_blank" rel="noopener" href="' + waLink(q.phone, m.text) + '">WhatsApp: ' + esc(m.label) + '</a>'; }).join('') : '<p class="small">Add a mobile number to send WhatsApp messages.</p>') + '</div>' +
       '<p class="small">Sending the thank-you marks the query as Answered.</p></div>' +
-      (q.message || q.notes || q.lostReason ? '<div class="card"><h3>Notes</h3>' + (q.message ? '<p><b>Asked:</b> ' + esc(q.message) + '</p>' : '') + (q.notes ? '<p><b>Internal:</b> ' + esc(q.notes) + '</p>' : '') + (q.lostReason ? '<p><b>Not booked because:</b> ' + esc(q.lostReason) + '</p>' : '') + '</div>' : '');
+      (q.message || q.notes || q.lostReason ? '<div class="card"><h3>Notes</h3>' + (q.message ? '<p><b>Asked:</b> ' + esc(q.message) + '</p>' : '') + (q.notes ? '<p><b>Internal:</b> ' + esc(q.notes) + '</p>' : '') + (q.lostReason ? '<p><b>Not booked because:</b> ' + esc(q.lostReason) + '</p>' : '') + '</div>' : '') + syncCard();
     return {
       title: 'Query', tab: 'queries', back: '#/queries', html: html, after: function () {
         function set(o, msg, next) { Object.keys(o).forEach(function (k) { q[k] = o[k]; }); q.updatedAt = nowISO(); save().then(function () { toast(msg); if (next) location.replace(next); else render(); }); }
@@ -1240,6 +1605,7 @@
           };
         });
         var cd = $('#cpdel'); if (cd) cd.onclick = function () { set({ couponType: '', couponValue: '', couponCode: '', couponOfferedAt: '' }, 'Coupon removed'); };
+        bindSyncCard();
         $$('[data-qmsg="thanks"]').forEach(function (x) { x.addEventListener('click', function () { if (q.status === 'Open') { q.status = 'Answered'; q.answeredAt = nowISO(); q.updatedAt = nowISO(); save(); setTimeout(render, 400); } }); });
       }
     };
@@ -1519,10 +1885,10 @@
       var cells = '<td class="rn">' + esc(r.name) + '</td>';
       for (var d = 1; d <= dim; d++) {
         var ds = calMonth + '-' + pad(d);
-        var bk = data.bookings.filter(function (b) { return A.roomIds(b).indexOf(r.id) >= 0 && (A.isActive(b) || b.status === 'Enquiry') && b.checkIn <= ds && b.checkOut > ds; });
+        var bk = data.bookings.filter(function (b) { return A.blockedIds(A.roomIds(b), s).indexOf(r.id) >= 0 && (A.isActive(b) || b.status === 'Enquiry') && A.isDate(b.checkIn) && b.checkIn <= ds && b.checkOut > ds; });
         if (bk.length) {
           var b = bk[0], startHere = b.checkIn === ds || d === 1;
-          cells += '<td class="occ ' + (bk.length > 1 ? 'clash' : statusClass(b.status)) + '"><a href="#/guest/' + b.id + '" title="' + esc(b.guestName) + '">' + (startHere ? esc(b.guestName.split(' ')[0].slice(0, 6)) : '') + '</a></td>';
+          cells += '<td class="occ ' + (bk.length > 1 ? 'clash' : statusClass(b.status)) + '"><a href="#/guest/' + b.id + '" title="' + esc(gname(b)) + '">' + (startHere ? esc((A.roomIds(b).indexOf(r.id) < 0 ? '↳' : '') + gname(b).split(' ')[0].slice(0, 6)) : '') + '</a></td>';
         } else cells += '<td class="free"><a href="#/new/roomId=' + encodeURIComponent(r.id) + '&checkIn=' + ds + '" aria-label="Book ' + esc(r.name) + ' on ' + ds + '"></a></td>';
       }
       return '<tr>' + cells + '</tr>';
@@ -1531,8 +1897,8 @@
       (rooms.length ? '<div class="calwrap"><table class="cal">' + head + body + '</table></div>' : empty('Add rooms in Settings first.', '<a class="btn" href="#/settings">Settings</a>')) +
       '<p class="small legend"><span class="lg st-confirmed"></span>Confirmed <span class="lg st-checked-in"></span>In-house <span class="lg st-checked-out"></span>Left <span class="lg st-enquiry"></span>Enquiry <span class="lg clash"></span>Clash · Tap an empty cell to book.</p>' +
       '<h2>Room status today</h2>' + rooms.map(function (r) {
-        var occ = data.bookings.filter(function (b) { return A.roomIds(b).indexOf(r.id) >= 0 && A.isActive(b) && b.checkIn <= t && b.checkOut > t; })[0];
-        return '<div class="card roomrow"><div><b>' + esc(r.name) + '</b><br><small>' + (occ ? 'Occupied · ' + esc(occ.guestName) : 'Available tonight') + '</small></div><button class="btn sm ' + (r.clean === false ? 'danger' : '') + '" data-clean="' + r.id + '">' + (r.clean === false ? 'Needs cleaning' : 'Clean ✓') + '</button></div>';
+        var occ = data.bookings.filter(function (b) { return A.blockedIds(A.roomIds(b), s).indexOf(r.id) >= 0 && A.isActive(b) && A.isDate(b.checkIn) && b.checkIn <= t && b.checkOut > t; })[0];
+        return '<div class="card roomrow"><div><b>' + esc(r.name) + '</b><br><small>' + (occ ? 'Occupied · ' + esc(gname(occ)) + (A.roomIds(occ).indexOf(r.id) < 0 ? ' (via ' + esc(roomsLabel(occ)) + ')' : '') : 'Available tonight') + '</small></div><button class="btn sm ' + (r.clean === false ? 'danger' : '') + '" data-clean="' + r.id + '">' + (r.clean === false ? 'Needs cleaning' : 'Clean ✓') + '</button></div>';
       }).join('');
     return {
       title: 'Room calendar', tab: 'calendar', html: html, after: function () {
@@ -1696,7 +2062,7 @@
     exMonth = exMonth || thisMonth();
     var s = S(), list = data.expenses.filter(function (e) { return A.monthOf(e.date) === exMonth; }).sort(function (a, b) { return a.date < b.date ? 1 : -1; });
     var html = '<form id="ef" class="card" novalidate><h3>Add expense</h3><div class="two">' +
-      field('Amount ₹ *', '<input name="amount" type="number" inputmode="decimal" min="0" step="any">') + field('Date', '<input name="date" type="date" value="' + today() + '">') + '</div><div class="two">' +
+      field('Amount ₹', '<input name="amount" type="number" inputmode="decimal" min="0" step="any">') + field('Date', '<input name="date" type="date" value="' + today() + '">') + '</div><div class="two">' +
       field('Category', '<select name="category">' + options(s.expenseCats, s.expenseCats[0]) + '</select>') + field('Paid by', '<select name="method">' + options(['Cash', 'UPI', 'Card', 'Bank Transfer'], 'Cash') + '</select>') + '</div>' +
       field('Note', '<input name="note" placeholder="e.g. vegetables, Ramesh salary">') + '<div id="eerr"></div><button class="btn primary" type="submit">Add expense</button></form>' +
       field('Month', '<input type="month" id="em" value="' + exMonth + '">') +
@@ -1708,7 +2074,7 @@
           ev.preventDefault();
           var f = this, amt = r2(f.elements.amount.value);
           if (!(amt > 0)) return ($('#eerr').innerHTML = '<div class="warn">Enter an amount greater than ₹0.</div>');
-          if (!A.isDate(f.elements.date.value)) return ($('#eerr').innerHTML = '<div class="warn">Choose a date.</div>');
+          if (!A.isDate(f.elements.date.value)) f.elements.date.value = today();
           data.expenses.push({ id: uid(), amount: amt, date: f.elements.date.value, category: f.elements.category.value, method: f.elements.method.value, note: f.elements.note.value.trim(), createdAt: nowISO(), updatedAt: nowISO() });
           exMonth = A.monthOf(f.elements.date.value);
           save().then(function () { toast('Expense added'); render(); });
@@ -1723,13 +2089,13 @@
   routes.bill = function (arg) {
     var id = String(arg || '').split('/')[0], kind = String(arg || '').split('/')[1] || '';
     var b = booking(id); if (!b) return { title: 'Not found', html: empty('Booking not found.'), back: '#/bookings' };
-    kind = kind === 'invoice' || (!kind && b.status === 'Checked Out') ? 'invoice' : 'confirmation';
+    kind = kind === 'statement' ? 'statement' : kind === 'invoice' || (!kind && b.status === 'Checked Out') ? 'invoice' : 'confirmation';
     var html = '<div class="actions noprint"><button class="btn primary" onclick="window.print()">Print / Save as PDF</button>' +
-      '<a class="btn' + (kind === 'confirmation' ? ' on' : '') + '" href="#/bill/' + b.id + '/confirmation">Confirmation</a>' +
+      '<a class="btn' + (kind === 'confirmation' ? ' on' : '') + '" href="#/bill/' + b.id + '/confirmation">Confirmation</a>' + '<a class="btn' + (kind === 'statement' ? ' on' : '') + '" href="#/bill/' + b.id + '/statement">Food & services</a>' +
       (b.status === 'Checked Out' ? '<a class="btn' + (kind === 'invoice' ? ' on' : '') + '" href="#/bill/' + b.id + '/invoice">Invoice</a>' : '') + '</div>' +
       (kind === 'invoice' && !b.invoiceNo ? '<div class="warn noprint">The invoice number is given by your Google Sheet at the next sync.</div>' : '') +
       '<div class="docwrap">' + A.docHtml(kind, b, data) + '</div>';
-    return { title: kind === 'invoice' ? 'Tax invoice' : 'Booking confirmation', back: '#/guest/' + b.id, tab: 'bookings', html: html };
+    return { title: kind === 'invoice' ? 'Tax invoice' : kind === 'statement' ? 'Food & services statement' : 'Booking confirmation', back: kind === 'statement' ? '#/fs/' + b.id : '#/guest/' + b.id, tab: 'bookings', html: html };
   };
 
   /* ---------- IMPORT OLD BOOKINGS (prepared file from the Numbers sheets) ---------- */
@@ -1947,12 +2313,25 @@
       '<div class="three">' + field('Threshold ₹/night', '<input name="gstThreshold" type="number" step="any" value="' + s.gstThreshold + '">') + field('Food GST %', '<input name="gstFood" type="number" step="any" value="' + s.gstFood + '">') + field('Other GST %', '<input name="gstOther" type="number" step="any" value="' + s.gstOther + '">') + '</div>' +
       '<p class="small">Defaults follow the rates in force since 22 Sep 2025 (rooms ≤ ₹7,500/night 5%; food at non-“specified premises” 5%). Confirm the food and other-charges rates with your CA. Changes apply to new bookings; existing bookings keep their rates.</p></div>' +
       '<div class="card"><h3>Rooms & base tariff</h3><div id="rooms">' + s.rooms.map(function (r, i) {
-        return '<div class="roomedit"><input data-r="' + i + '" data-k="name" value="' + esc(r.name) + '" aria-label="Room name"><input data-r="' + i + '" data-k="tariff" type="number" inputmode="decimal" value="' + esc(r.tariff) + '" aria-label="Tariff per night"><label class="chk sm"><input type="checkbox" data-r="' + i + '" data-k="active"' + (r.active !== false ? ' checked' : '') + '> Active</label></div>';
-      }).join('') + '</div><button type="button" class="btn sm" id="addroom">＋ Add room</button><p class="small">Tariff is per night. Untick Active to hide a room without losing its history.</p></div>' +
+        var others = s.rooms.filter(function (x) { return x.id !== r.id && x.active !== false; }), inc = r.includes || [];
+        return '<div class="roomedit"><input data-r="' + i + '" data-k="name" value="' + esc(r.name) + '" aria-label="Room name"><input data-r="' + i + '" data-k="tariff" type="number" inputmode="decimal" value="' + esc(r.tariff) + '" aria-label="Tariff per night"><label class="chk sm"><input type="checkbox" data-r="' + i + '" data-k="active"' + (r.active !== false ? ' checked' : '') + '> Active</label></div>' +
+          (others.length ? '<details class="fld incl"><summary>' + (inc.length ? 'Includes: ' + esc(inc.map(roomName).join(', ')) : 'Is this unit made of other rooms?') + '</summary><p class="small">Tick the rooms that are part of ' + esc(r.name) + '. Booking it then also blocks them (and booking one of them blocks ' + esc(r.name) + ') in the calendar and the double-booking check.</p>' +
+            others.map(function (o) { return '<label class="chk sm"><input type="checkbox" data-inc="' + i + '" value="' + esc(o.id) + '"' + (inc.indexOf(o.id) >= 0 ? ' checked' : '') + '> ' + esc(o.name) + '</label>'; }).join('') + '</details>' : '');
+      }).join('') + '</div><button type="button" class="btn sm" id="addroom">＋ Add room</button><p class="small">Tariff is per night. New bookings fill room charges as tariff × nights (season rates where set); you can change the amount on each booking. Untick Active to hide a room without losing its history.</p></div>' +
+      '<div class="card"><h3>Food menu</h3><p class="small">Used to read bill photos and to add items by hand. Leave the price empty for MRP items (price entered on each bill). “kg” items take quantities like 1.5.</p><div id="menuEd">' + (function () {
+        var cats = [], by = {}; (s.menu || []).forEach(function (m, i) { if (!by[m.cat]) { by[m.cat] = []; cats.push(m.cat); } by[m.cat].push([m, i]); });
+        return cats.map(function (cname) { return '<details class="fld"><summary>' + esc(cname) + ' (' + by[cname].length + ')</summary>' + by[cname].map(function (x) { var m = x[0], i = x[1]; return '<div class="roomedit menuline"><input data-mi="' + i + '" data-k="name" value="' + esc(m.name) + '" aria-label="Item"><input data-mi="' + i + '" data-k="price" type="number" inputmode="decimal" min="0" step="any" value="' + (m.price == null ? '' : esc(m.price)) + '" placeholder="MRP" aria-label="Price"><select data-mi="' + i + '" data-k="unit" aria-label="Unit">' + options([{ id: '', name: 'each' }, { id: 'kg', name: 'per kg' }], m.unit || '') + '</select><button type="button" class="x" data-rmmi="' + i + '" aria-label="Remove item">−</button></div>'; }).join('') +
+          '<button type="button" class="btn sm" data-addmi="' + esc(cname) + '">＋ Add to ' + esc(cname) + '</button></details>'; }).join('');
+      })() + '</div></div>' +
+      '<div class="card"><h3>Meal rates (per person)</h3><div class="three">' + A.MEALS.map(function (m) { return field(m + ' ₹', '<input data-mr="' + m + '" type="number" inputmode="decimal" min="0" step="any" value="' + esc(num((s.mealRates || {})[m]) || '') + '">'); }).join('') + '</div>' +
+      '<p class="small">Ticking a meal on a booking charges persons × this rate. You can change persons or the amount on each booking.</p></div>' +
+      '<div class="card"><h3>Services</h3><div id="svcs">' + (s.services || []).map(function (v, i) {
+        return '<div class="roomedit"><input data-sv="' + i + '" data-k="name" value="' + esc(v.name) + '" placeholder="e.g. Bonfire" aria-label="Service name"><input data-sv="' + i + '" data-k="rate" type="number" inputmode="decimal" min="0" step="any" value="' + esc(num(v.rate) || '') + '" placeholder="₹ each" aria-label="Default price"><button type="button" class="x" data-rmsv="' + i + '" aria-label="Remove service">−</button></div>';
+      }).join('') + '</div><button type="button" class="btn sm" id="addsv">＋ Add service</button><p class="small">Shown in the list when you add a service to a day of a booking (quantity × price). You can also type a one-off service there.</p></div>' +
       '<div class="card"><h3>Season rate card</h3><div id="seasons">' + s.seasons.map(function (se, i) {
         return '<div class="season"><div class="two"><input data-s="' + i + '" data-k="name" value="' + esc(se.name) + '" placeholder="Season name"><button type="button" class="btn sm danger" data-dels="' + i + '">Remove</button></div><div class="two"><input type="date" data-s="' + i + '" data-k="from" value="' + esc(se.from) + '"><input type="date" data-s="' + i + '" data-k="to" value="' + esc(se.to) + '"></div>' +
           s.rooms.filter(function (r) { return r.active !== false; }).map(function (r) { return '<label class="fld inline2"><span>' + esc(r.name) + ' ₹/night</span><input type="number" inputmode="decimal" data-s="' + i + '" data-room="' + r.id + '" value="' + esc((se.rates || {})[r.id] || '') + '"></label>'; }).join('') + '</div>';
-      }).join('') + '</div><button type="button" class="btn sm" id="addseason">＋ Add season</button><p class="small">On the booking form, “Fill room charges from rate card” uses the season rate for each night, otherwise the base tariff.</p></div>' +
+      }).join('') + '</div><button type="button" class="btn sm" id="addseason">＋ Add season</button><p class="small">On the booking form, room charges use the season rate for each night that falls in a season, otherwise the base tariff.</p></div>' +
       '<div class="card"><h3>Payments & reviews</h3><div class="two">' + field('Token amount ₹', '<input name="tokenAmount" type="number" inputmode="decimal" min="0" value="' + esc(s.tokenAmount) + '">') +
       field('Your UPI ID', '<input name="upiId" value="' + esc(s.upiId) + '" placeholder="FILL IN: name@bank">') + '</div>' +
       field('Coupon code prefix', '<input name="couponPrefix" value="' + esc(s.couponPrefix || 'ATH') + '" maxlength="8" autocapitalize="characters">', '', 'Codes look like ATH10-K7QM (10% off) or ATHR500-K7QM (₹500 off).') +
@@ -1962,7 +2341,7 @@
       }).join('') +
       '<label class="chk"><input type="checkbox" name="autoReviewEmail"' + (s.autoReviewEmail !== false ? ' checked' : '') + '> Also email the review request automatically after check-out (off by default: you send it on WhatsApp from the booking)</label></div>' +
       '<div class="card"><h3>Your own booking fields</h3><div id="cfs">' + (s.customFields || []).map(function (cf, i) {
-        return '<div class="roomedit"><input data-cfi="' + i + '" data-k="label" value="' + esc(cf.label) + '" placeholder="e.g. Vehicle number"><label class="chk sm"><input type="checkbox" data-cfi="' + i + '" data-k="required"' + (cf.required ? ' checked' : '') + '> Required</label><button type="button" class="x" data-rmcf="' + i + '" aria-label="Remove field">−</button></div>';
+        return '<div class="roomedit"><input data-cfi="' + i + '" data-k="label" value="' + esc(cf.label) + '" placeholder="e.g. Vehicle number"><button type="button" class="x" data-rmcf="' + i + '" aria-label="Remove field">−</button></div>';
       }).join('') + '</div><button type="button" class="btn sm" id="addcf">＋ Add field</button><p class="small">Shown on every booking form under More details, on the guest register PDF and in the Bookings tab.</p></div>' +
       '<div class="card"><h3>Lists</h3>' + field('Booking sources (one per line)', '<textarea name="sources" rows="5">' + esc(s.sources.join('\n')) + '</textarea>') +
       field('Expense categories (one per line)', '<textarea name="expenseCats" rows="5">' + esc(s.expenseCats.join('\n')) + '</textarea>') + '</div>' +
@@ -1979,7 +2358,7 @@
       '<div class="card"><h3>Cloud sync to your Google Sheet</h3><p class="small">Optional and free. Sends a copy of all records to your own Google Sheet, which keeps dated backups in your Drive and emails your reminders. Follow the setup guide to get these two values.</p>' +
       field('Web app URL', '<input id="surl" value="' + esc(s.syncUrl) + '" placeholder="FILL IN: https://script.google.com/macros/s/…/exec">') +
       field('Sync key', '<input id="stok" value="' + esc(s.syncToken) + '" placeholder="FILL IN: key shown in your Sheet" autocomplete="off">') +
-      '<label class="chk"><input type="checkbox" id="sauto"' + (s.autoSync ? ' checked' : '') + '> Sync automatically after changes (when online)</label>' +
+      '<label class="chk"><input type="checkbox" id="sauto"' + (s.autoSync ? ' checked' : '') + '> Sync after every change I save (when online)</label><p class="small">There is no timed syncing. To get changes made on the other device, tap Sync now (here, at the bottom of any booking or query, or on Home).</p>' +
       '<div class="actions"><button class="btn" id="ssave">Save sync settings</button><button class="btn primary" id="snow">Sync now</button></div><div id="smsg">' + syncStatusHtml() + '</div></div>';
     return {
       title: 'Settings', tab: 'more', back: '#/more', html: html, after: function () {
@@ -1989,6 +2368,11 @@
             var r = s.rooms[+el.dataset.r];
             if (el.dataset.k === 'active') r.active = el.checked; else if (el.dataset.k === 'tariff') r.tariff = r2(el.value); else r.name = el.value.trim() || r.name;
           });
+          $$('[data-inc]', f).forEach(function (el) { var r = s.rooms[+el.dataset.inc]; if (!r.__incSeen) { r.includes = []; r.__incSeen = 1; } if (el.checked) r.includes.push(el.value); });
+          s.rooms.forEach(function (r) { delete r.__incSeen; });
+          $$('[data-mi]', f).forEach(function (el) { var m = s.menu[+el.dataset.mi]; if (!m) return; if (el.dataset.k === 'price') m.price = el.value === '' ? null : r2(el.value); else if (el.dataset.k === 'unit') m.unit = el.value; else m.name = el.value.trim() || m.name; });
+          s.mealRates = s.mealRates || {}; $$('[data-mr]', f).forEach(function (el) { s.mealRates[el.dataset.mr] = r2(el.value); });
+          s.services = s.services || []; $$('[data-sv]', f).forEach(function (el) { var v = s.services[+el.dataset.sv]; if (!v) return; if (el.dataset.k === 'rate') v.rate = r2(el.value); else v.name = el.value.trim(); });
           $$('[data-s]', f).forEach(function (el) {
             var se = s.seasons[+el.dataset.s];
             if (el.dataset.room) { se.rates = se.rates || {}; se.rates[el.dataset.room] = r2(el.value); } else se[el.dataset.k] = el.value;
@@ -2000,15 +2384,20 @@
           makeLogo(file).then(function (url) { s.logo = url; return save(); }).then(function () { toast('Logo saved. It reaches the Sheet at the next sync.'); render(); }).catch(function (e) { toast('Could not read that image: ' + e.message, true); });
         };
         var lc = $('#logoclear'); if (lc) lc.onclick = function () { s.logo = ''; save().then(render); };
-        function collectCf() { $$('[data-cfi]', f).forEach(function (el) { var cf = s.customFields[+el.dataset.cfi]; if (el.dataset.k === 'required') cf.required = el.checked; else cf.label = el.value.trim(); }); }
+        function collectCf() { $$('[data-cfi]', f).forEach(function (el) { var cf = s.customFields[+el.dataset.cfi]; cf.label = el.value.trim(); }); }
         $('#addcf').onclick = function () { collectRooms(); s.customFields = s.customFields || []; collectCf(); s.customFields.push({ id: 'cf-' + uid().slice(0, 8), label: '', required: false }); save(); render(); };
         $$('[data-rmcf]').forEach(function (x) { x.onclick = function () { collectRooms(); collectCf(); s.customFields.splice(+x.dataset.rmcf, 1); save(); render(); }; });
+        $$('[data-addmi]').forEach(function (x) { x.onclick = function () { collectRooms(); var nm = prompt('Item name'); if (!nm || !nm.trim()) return; var pr = prompt('Price ₹ (leave empty for MRP)', ''); s.menu.push({ id: 'm-' + uid().slice(0, 8), cat: x.dataset.addmi, name: nm.trim(), price: pr === null || pr.trim() === '' ? null : r2(pr), aliases: [], unit: '' }); save(); render(); }; });
+        $$('[data-rmmi]').forEach(function (x) { x.onclick = function () { collectRooms(); var m = s.menu[+x.dataset.rmmi]; if (!confirm('Remove ' + m.name + ' from the menu? Bookings that have it keep it.')) return; s.menu.splice(+x.dataset.rmmi, 1); save(); render(); }; });
+        $('#addsv').onclick = function () { collectRooms(); s.services = s.services || []; s.services.push({ name: '', rate: 0 }); save(); render(); };
+        $$('[data-rmsv]').forEach(function (x) { x.onclick = function () { collectRooms(); s.services.splice(+x.dataset.rmsv, 1); save(); render(); }; });
         $('#addroom').onclick = function () { collectRooms(); s.rooms.push({ id: uid(), name: 'Room ' + (s.rooms.length + 1), tariff: 0, active: true, clean: true }); save(); render(); };
         $('#addseason').onclick = function () { collectRooms(); s.seasons.push({ id: uid(), name: 'Peak season', from: '', to: '', rates: {} }); save(); render(); };
         $$('[data-dels]').forEach(function (b) { b.onclick = function () { collectRooms(); s.seasons.splice(+b.dataset.dels, 1); save(); render(); }; });
         f.onsubmit = function (ev) {
           ev.preventDefault();
           collectRooms(); collectCf(); s.customFields = s.customFields.filter(function (cf) { return cf.label; });
+          s.services = (s.services || []).filter(function (v) { return v.name; });
           ['businessName', 'legalName', 'address', 'phone', 'email', 'gstin', 'billFooter', 'website', 'checkInTime', 'checkOutTime', 'sacOther'].forEach(function (k) { s[k] = f.elements[k].value.trim(); });
           s.invoicePrefix = (f.elements.invoicePrefix.value || 'INV').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5) || 'INV'; s.invoiceStart = Math.max(1, Math.round(num(f.elements.invoiceStart.value)) || 1);
           s.gstin = s.gstin.toUpperCase();
@@ -2042,6 +2431,7 @@
           save(true).then(function () { toast('Sync settings saved'); });
         };
         $('#snow').onclick = function () { syncNow(true); };
+
       }
     };
   };
@@ -2082,6 +2472,15 @@
     var s = data.settings; if (!s.autoSync || !s.syncUrl || !s.syncToken) return;
     clearTimeout(syncTimer); syncTimer = setTimeout(function () { syncNow(false); }, 1500);
   }
+  /* Sync now box at the bottom of each booking and query (and on Home). */
+  function syncCard() {
+    if (!S().syncUrl) return '<div class="card"><h3>Sync</h3><p class="small">Cloud sync is not set up yet (More → Settings → Cloud sync).</p></div>';
+    return '<div class="card"><h3>Sync</h3><p class="small">Changes sync by themselves after you save. Tap Sync now to send and fetch the latest (for example after working on the other device).</p>' +
+      '<div class="actions"><button class="btn primary" data-syncnow>Sync now</button></div><div data-syncmsg>' + syncStatusHtml() + '</div></div>';
+  }
+  function bindSyncCard() {
+    $$('[data-syncnow]').forEach(function (x) { x.onclick = function () { x.disabled = true; x.textContent = 'Syncing…'; syncNow(true); if (!syncing) { x.disabled = false; x.textContent = 'Sync now'; } }; });
+  }
   function syncStatusHtml() {
     var m = data.meta;
     if (m.lastSyncError) return '<div class="warn">Last sync failed: ' + esc(m.lastSyncError) + '</div>';
@@ -2106,19 +2505,20 @@
           /* records were replaced by the merged copy: redraw so buttons act on the fresh records (not while a form is open) */
           if (j.data && !/^#\/(new|edit|gx|pay|qnew|qedit|settings|importbk|import|formc)/.test(location.hash)) render();
           if (manual) toast('Synced to Google Sheet'); return uploadDocs(manual);
+        }).then(function () { if (docsRedraw && /^#\/gx\//.test(location.hash)) try { docsRedraw(); } catch (e) { /* screen changed */ }
         });
       })
       .catch(function (e) {
         data.meta.lastSyncError = e.message || String(e); save(true);
         if (manual) toast('Sync failed: ' + data.meta.lastSyncError, true);
       })
-      .then(function () { syncing = false; var sm = $('#smsg'); if (sm) sm.innerHTML = syncStatusHtml(); if (syncAgain) { syncAgain = false; setTimeout(function () { syncNow(false); }, 300); } });
+      .then(function () { syncing = false; $$('#smsg,[data-syncmsg]').forEach(function (sm) { sm.innerHTML = syncStatusHtml(); }); $$('[data-syncnow]').forEach(function (x) { x.disabled = false; x.textContent = 'Sync now'; }); if (syncAgain) { syncAgain = false; setTimeout(function () { syncNow(false); }, 300); } });
   }
   /* Bring in what other devices (and the Sheet) changed. Newest change of each record wins; device-only settings stay. */
   function applyServer(remote) {
     trackChanges();
     var localDocs = {};
-    data.bookings.forEach(function (b) { A.guestsOf(b).forEach(function (g) { (g.docs || []).forEach(function (d) { localDocs[d.id] = d.local; }); }); });
+    data.bookings.forEach(function (b) { A.guestsOf(b).concat([{ docs: b.billDocs || [] }]).forEach(function (g) { (g.docs || []).forEach(function (d) { localDocs[d.id] = d.local; }); }); });
     var m = A.syncMerge(data, remote), mine = data.settings;
     A.COLLS.forEach(function (k) { data[k] = m[k]; });
     data.deleted = m.deleted;
@@ -2128,7 +2528,7 @@
       var def = defaultSettings(); Object.keys(def).forEach(function (k) { if (ns[k] === undefined) ns[k] = def[k]; });
       data.settings = ns;
     }
-    data.bookings.forEach(function (b) { A.guestsOf(b).forEach(function (g) { (g.docs || []).forEach(function (d) { d.local = localDocs[d.id] === undefined ? false : localDocs[d.id]; }); }); });
+    data.bookings.forEach(function (b) { A.guestsOf(b).concat([{ docs: b.billDocs || [] }]).forEach(function (g) { (g.docs || []).forEach(function (d) { d.local = localDocs[d.id] === undefined ? false : localDocs[d.id]; }); }); });
     trackInit();
     data.meta.lastMergeStats = m.stats;
   }
@@ -2148,18 +2548,18 @@
       var bytes = Uint8Array.from(atob(j.pdf), function (ch) { return ch.charCodeAt(0); });
       var blob = new Blob([bytes], { type: 'application/pdf' }), name = j.name || (kind + '.pdf');
       var first = firstName(b.guestName), B = A.biz(s);
-      var text = kind === 'invoice'
+      var text = kind === 'statement' ? 'Namaste ' + first + ', please find attached the day-wise details of the food and services during your stay at ' + B.name + ' (booking ' + (b.no || '') + ').' : kind === 'invoice'
         ? 'Namaste ' + first + ', thank you for staying at ' + B.name + '. Please find your tax invoice ' + (j.invoiceNo || '') + ' attached. We hope to welcome you again!'
         : 'Namaste ' + first + ', your booking at ' + B.name + ' is confirmed. Booking reference ' + (b.no || '') + '. Check-in from ' + B.checkInTime + ', check-out by ' + B.checkOutTime + '. Your confirmation is attached. Call or WhatsApp ' + B.phone + ' for anything you need.';
       var file = null; try { file = new File([blob], name, { type: 'application/pdf' }); } catch (e) { file = null; }
       if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
         return navigator.share({ files: [file], text: text, title: name }).then(function () {
-          b[kind === 'invoice' ? 'invoiceSentAt' : 'confirmationSentAt'] = nowISO(); save(); toast('Shared');
+          b[kind === 'invoice' ? 'invoiceSentAt' : kind === 'statement' ? 'statementSentAt' : 'confirmationSentAt'] = nowISO(); save(); toast('Shared');
         }).catch(function (e) { if (e && e.name !== 'AbortError') throw e; });
       }
       var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
       if (b.phone) window.open(waLink(b.phone, text + (j.page ? '\n\n' + j.page : '')), '_blank');
-      b[kind === 'invoice' ? 'invoiceSentAt' : 'confirmationSentAt'] = nowISO(); save();
+      b[kind === 'invoice' ? 'invoiceSentAt' : kind === 'statement' ? 'statementSentAt' : 'confirmationSentAt'] = nowISO(); save();
       toast('PDF downloaded. WhatsApp opened: attach the PDF from Downloads, or send the link in the message.');
     }).catch(function (e) { toast(e.message || String(e), true); }).then(done);
   }
@@ -2186,7 +2586,10 @@
   function toB64(blob) { return new Promise(function (res, rej) { var r = new FileReader(); r.onload = function () { res(String(r.result).split(',')[1] || ''); }; r.onerror = function () { rej(r.error); }; r.readAsDataURL(blob); }); }
   function pendingDocs() {
     var out = [];
-    data.bookings.forEach(function (b) { A.guestsOf(b).forEach(function (g) { (g.docs || []).forEach(function (d) { if (!d.deleted && !d.driveId && d.local !== false) out.push({ b: b, g: g, d: d }); }); }); });
+    data.bookings.forEach(function (b) {
+      A.guestsOf(b).forEach(function (g) { (g.docs || []).forEach(function (d) { if (!d.deleted && !d.driveId && d.local !== false) out.push({ b: b, g: g, d: d }); }); });
+      (b.billDocs || []).forEach(function (d) { if (!d.deleted && !d.driveId && d.local !== false) out.push({ b: b, g: { id: 'bill' }, d: d }); });
+    });
     return out;
   }
   function uploadDocs(manual) {
@@ -2218,18 +2621,13 @@
     var days = num(data.settings.keepPhotosDays || 30), cut = A.addDays(today(), -days), n = 0;
     data.bookings.forEach(function (b) {
       if (!(b.checkOut < cut)) return;
-      A.guestsOf(b).forEach(function (g) { (g.docs || []).forEach(function (d) { if (d.driveId && d.local !== false) { fileDel(d.id).catch(function () {}); d.local = false; n++; } }); });
+      A.guestsOf(b).concat([{ docs: b.billDocs || [] }]).forEach(function (g) { (g.docs || []).forEach(function (d) { if (d.driveId && d.local !== false) { fileDel(d.id).catch(function () {}); d.local = false; n++; } }); });
     });
     return n ? save(true) : Promise.resolve();
   }
-  window.addEventListener('online', function () { scheduleSync(); });
-  function autoPull() { var s = data && data.settings; if (s && s.autoSync && s.syncUrl && s.syncToken && !document.hidden && !locked()) syncNow(false); }
-  document.addEventListener('visibilitychange', function () { if (!document.hidden) setTimeout(autoPull, 800); });
-  window.addEventListener('focus', function () { setTimeout(autoPull, 800); });
-  /* While the app stays open (e.g. on the laptop), check for the other device's changes every minute. */
-  setInterval(autoPull, 60000);
-  setInterval(autoPull, 120000);
-  setTimeout(autoPull, 1500);
+  /* Version 1.7: no timed syncing. The app syncs after every change you save (when online), retries when the
+     connection comes back if a change is waiting, and whenever you tap Sync now. */
+  window.addEventListener('online', function () { if (data && data.meta.lastSyncError) scheduleSync(); });
 
   /* ---------- offline indicator + service worker ---------- */
   function netBadge() { $('#net').hidden = navigator.onLine; }

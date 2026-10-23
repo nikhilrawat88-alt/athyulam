@@ -85,7 +85,7 @@ var AH = (function () {
 
     if (isCancelled(b)) {
       var fee = r2(b.cancelFee);
-      c.room = 0; c.food = 0; c.additional = 0; c.discount = 0; c.coupon = 0; c.couponLabel = ''; c.cancelFee = fee; c.roomParts = [];
+      c.room = 0; c.food = 0; c.additional = 0; c.discount = 0; c.extrasDiscount = 0; c.coupon = 0; c.couponLabel = ''; c.cancelFee = fee; c.roomParts = [];
       c.subtotal = fee; c.taxable = fee;
       c.gstRoom = 0; c.gstFood = 0; c.gstOther = 0; c.gst = 0;
       c.total = fee;
@@ -96,8 +96,12 @@ var AH = (function () {
       var share = sub ? disc / sub : 0;
       var roomT = r2(room - room * share), foodT = r2(food - food * share);
       var addT = r2(sub - disc - roomT - foodT);
+      /* Food & services discount (from the statement): only on food and services, before GST. */
+      var ex = Math.max(0, Math.min(r2(b.extrasDiscount), r2(foodT + addT)));
+      if (ex) { var fx = foodT + addT ? r2(ex * foodT / (foodT + addT)) : 0; foodT = r2(foodT - fx); addT = r2(addT - (ex - fx)); disc = r2(disc + ex); }
+      c.extrasDiscount = ex;
       var on = !!b.gstOn;
-      c.room = room; c.food = food; c.additional = add; c.discount = dd.disc; c.coupon = dd.coupon; c.couponLabel = couponLabel(b); c.cancelFee = 0;
+      c.room = room; c.food = food; c.additional = add; c.discount = r2(dd.disc + ex); c.coupon = dd.coupon; c.couponLabel = couponLabel(b); c.cancelFee = 0;
       c.subtotal = sub; c.taxable = r2(sub - disc);
       /* GST on rooms, room by room (a room above the ₹7,500 limit can be 18% while others are 5%). */
       var parts = [], left = roomT;
@@ -130,12 +134,16 @@ var AH = (function () {
     if (!c.countsAsRevenue) return [];
     var keys = ['room', 'food', 'additional', 'discount', 'coupon', 'gst', 'commission', 'cancelFee'];
     if (isCancelled(b)) {
-      var d = b.cancelledOn || String(b.updatedAt || b.checkIn).slice(0, 10);
+      var d = b.cancelledOn || String(b.updatedAt || b.checkIn || b.createdAt).slice(0, 10);
+      if (!isDate(d)) return [];
       var one = { date: d, nights: 0, bookingId: b.id, source: b.source, roomId: roomIds(b)[0] || '' };
       keys.forEach(function (k) { one[k] = num(c[k]); });
       return [finishLine(one)];
     }
     var n = Math.max(c.nights, 1), out = [], rs = roomsOf(b);
+    var start = isDate(b.checkIn) ? b.checkIn : (isDate(String(b.createdAt || '').slice(0, 10)) ? String(b.createdAt).slice(0, 10) : '');
+    if (!start) return [];
+    if (!isDate(b.checkIn)) n = 1;
     if (!rs.length) rs = [{ roomId: '', charge: 1 }];
     var wsum = sum(rs, function (r) { return r.charge; });
     var weights = rs.map(function (r) { return wsum ? num(r.charge) / wsum : 1 / rs.length; });
@@ -147,7 +155,7 @@ var AH = (function () {
       });
       var given = {};
       rs.forEach(function (r, j) {
-        var ln = { date: addDays(b.checkIn, i), nights: c.nights ? 1 : 0, bookingId: b.id, source: b.source, roomId: r.roomId };
+        var ln = { date: addDays(start, i), nights: c.nights ? 1 : 0, bookingId: b.id, source: b.source, roomId: r.roomId };
         keys.forEach(function (k) {
           given[k] = given[k] || 0;
           ln[k] = j === rs.length - 1 ? r2(night[k] - given[k]) : r2(night[k] * weights[j]);
@@ -313,11 +321,21 @@ var AH = (function () {
   }
 
   /* Hotel overlap rule: [checkIn, checkOut) ranges. Checkout day may be the next guest's check-in day. */
-  function overlaps(bookings, cand) {
-    var mine = roomIds(cand);
-    if (!mine.length || !isDate(cand.checkIn) || !isDate(cand.checkOut)) return [];
+  /* Rooms a booking really blocks: a unit that "includes" other rooms (e.g. a whole-house 4BHK) blocks them, and they block it. */
+  function blockedIds(ids, settings) {
+    var rooms = ((settings || {}).rooms || []), out = ids.slice();
+    rooms.forEach(function (r) {
+      var inc = r.includes || [];
+      if (ids.indexOf(r.id) >= 0) inc.forEach(function (x) { if (out.indexOf(x) < 0) out.push(x); });
+      if (inc.some(function (x) { return ids.indexOf(x) >= 0; }) && out.indexOf(r.id) < 0) out.push(r.id);
+    });
+    return out;
+  }
+  function overlaps(bookings, cand, settings) {
+    var mine = blockedIds(roomIds(cand), settings);
+    if (!roomIds(cand).length || !isDate(cand.checkIn) || !isDate(cand.checkOut)) return [];
     return (bookings || []).filter(function (b) {
-      return b.id !== cand.id && isActive(b) && b.checkIn < cand.checkOut && cand.checkIn < b.checkOut &&
+      return b.id !== cand.id && isActive(b) && isDate(b.checkIn) && b.checkIn < cand.checkOut && cand.checkIn < b.checkOut &&
         roomIds(b).some(function (r) { return mine.indexOf(r) >= 0; });
     });
   }
@@ -332,6 +350,7 @@ var AH = (function () {
   function paymentFlags(b, c, today) {
     if (isCancelled(b)) return c.outstanding < 0 ? 'refund-due' : (c.outstanding > 0 ? 'fee-due' : '');
     if (!isActive(b)) return '';
+    if (!isDate(b.checkIn)) return c.outstanding > 0 ? (c.received > 0 ? 'pending' : 'no-advance') : (c.outstanding < 0 ? 'overpaid' : '');
     if (c.outstanding > 0 && b.checkIn < today) return 'overdue';
     if (c.outstanding > 0 && b.checkIn === today) return 'due-today';
     if (c.outstanding > 0 && c.received <= 0) return 'no-advance';
@@ -406,39 +425,24 @@ var AH = (function () {
     return res;
   }
 
+  /* Version 1.7: every field is optional (fill details in later). Only values that cannot be right are refused. */
   function validateBooking(b, settings) {
     var e = {};
-    if (!String(b.guestName || '').trim()) e.guestName = 'Enter the guest name.';
-    var digits = String(b.phone || '').replace(/\D/g, '');
-    if (!digits && !b.imported) e.phone = 'Enter the mobile number.';
-    else if (b.phone && (digits.length < 10 || digits.length > 15)) e.phone = 'Phone number should have 10–15 digits.';
-    if (!b.source) e.source = 'Choose the booking source.';
-    if (!b.status) e.status = 'Choose the status.';
-    if (!b.nationality) e.nationality = 'Choose the nationality.';
-    if (b.nationality === 'Foreign' && !String(b.country || '').trim()) e.country = 'Enter the country.';
-    if (!b.imported && !String(b.idType || '').trim()) e.idType = 'Choose the ID type.';
-    if (!b.imported && !String(b.idValue || '').trim()) e.idValue = 'Enter the ID number' + (b.nationality === 'Foreign' ? ' (passport number).' : '.');
-    if (b.status !== 'Cancelled' && roomsOf(b).some(function (r) { return r.charge === '' || r.charge == null || !(Number(r.charge) > 0); })) e.room = 'Enter the charge for every room.';
-    (b.charges || []).forEach(function (c, i) { if (!String(c.name || '').trim() || !(Number(c.amount) > 0)) e['charge' + i] = 'Charge line ' + (i + 1) + ': enter what it is for and an amount above ₹0 (or remove the line).'; });
-    var cm = validateCustom(b, settings); if (cm.length) e.custom = 'Fill in: ' + cm.join(', ') + '.';
-    if (b.email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(b.email).trim())) e.email = 'Check the email address.';
-    var rids = roomIds(b);
-    if (!rids.length) e.roomId = 'Choose a room.';
-    else if (rids.some(function (r, i) { return !r || rids.indexOf(r) !== i; })) e.roomId = 'Each room can be added only once.';
-    if (roomsOf(b).some(function (r) { return isNaN(Number(r.charge)) || Number(r.charge) < 0; })) e.room = 'Room charges must be positive amounts.';
-    if (!isDate(b.checkIn)) e.checkIn = 'Choose a check-in date.';
-    if (!isDate(b.checkOut)) e.checkOut = 'Choose a check-out date.';
+    (b.charges || []).forEach(function (c, i) { if (c.amount !== '' && c.amount != null && (isNaN(Number(c.amount)) || Number(c.amount) < 0)) e['charge' + i] = 'Charge line ' + (i + 1) + ': amount cannot be negative.'; });
+    var rids = roomIds(b).filter(Boolean);
+    if (rids.some(function (r, i) { return rids.indexOf(r) !== i; })) e.roomId = 'Each room can be added only once.';
+    if (roomsOf(b).some(function (r) { return r.charge !== '' && r.charge != null && (isNaN(Number(r.charge)) || Number(r.charge) < 0); })) e.room = 'Room charges cannot be negative.';
     if (isDate(b.checkIn) && isDate(b.checkOut) && nights(b.checkIn, b.checkOut) < 1) e.checkOut = 'Check-out must be after check-in.';
-    if (num(b.adults) < 1) e.adults = 'At least 1 adult.';
+    if (num(b.adults) < 0) e.adults = 'Cannot be negative.';
     if (num(b.children) < 0) e.children = 'Cannot be negative.';
     ['room', 'food', 'additional', 'discount', 'commission', 'cancelFee', 'cancelCommission'].forEach(function (k) {
       if (b[k] !== '' && b[k] != null && (isNaN(Number(b[k])) || Number(b[k]) < 0)) e[k] = 'Enter a positive amount.';
     });
     if (num(b.discount) > num(b.room) + num(b.food) + num(b.additional)) e.discount = 'Discount is more than the charges.';
-    if (b.couponType === 'pct' && (num(b.couponValue) <= 0 || num(b.couponValue) > 100)) e.couponValue = 'Coupon % must be between 1 and 100.';
-    if (b.couponType === 'amt' && num(b.couponValue) <= 0) e.couponValue = 'Enter the coupon amount.';
+    if (num(b.extrasDiscount) < 0) e.extrasDiscount = 'Cannot be negative.';
+    else if (num(b.extrasDiscount) > num(b.food) + num(b.additional)) e.extrasDiscount = 'Food & services discount is more than the food and services.';
+    if (b.couponType === 'pct' && b.couponValue !== '' && (num(b.couponValue) < 0 || num(b.couponValue) > 100)) e.couponValue = 'Coupon % must be between 0 and 100.';
     if (b.couponType === 'amt' && num(b.couponValue) > num(b.room) + num(b.food) + num(b.additional) - num(b.discount)) e.couponValue = 'Coupon is more than the charges after discount.';
-    if (settings && settings.idMode !== 'full' && b.idValue && String(b.idValue).replace(/\s/g, '').length > 4) e.idValue = 'Only the last 4 characters are stored (change in Settings if legally required).';
     if (b.status === 'Cancelled' && num(b.cancelCommission) > num(b.cancelFee) && num(b.cancelFee) > 0) e.cancelCommission = 'Commission is more than the cancellation fee.';
     return e;
   }
@@ -550,7 +554,7 @@ var AH = (function () {
     if (!isDate(ci)) return [];
     if (!isDate(co) || nights(ci, co) < 1) co = addDays(ci, 1);
     var rooms = activeRooms(data.settings || {}).filter(function (r) { return !roomId || r.id === roomId; });
-    return rooms.filter(function (r) { return overlaps(data.bookings, { id: '__check__', roomId: r.id, checkIn: ci, checkOut: co }).length === 0; });
+    return rooms.filter(function (r) { return overlaps(data.bookings, { id: '__check__', roomId: r.id, checkIn: ci, checkOut: co }, data.settings).length === 0; });
   }
   /* Direct queries still not booked on the day before (or the day of) check-in, while a room is free. */
   function couponCandidates(data, today) {
@@ -889,7 +893,209 @@ var AH = (function () {
     });
     return out;
   }
-  /* Itemised extra charges: lines of { type: 'Food' | 'Other', name, amount }. Totals feed the food / additional amounts. */
+  /* "4D/3N": days = nights + 1 (arrival day to departure day). */
+  function stayLabel(b) { var n = nights(b.checkIn, b.checkOut); return n > 0 ? (n + 1) + 'D/' + n + 'N' : ''; }
+  function stayDays(b) { var n = nights(b.checkIn, b.checkOut); return n > 0 ? n + 1 : 0; }
+  function dayDate(b, day) { return isDate(b.checkIn) && day > 0 ? addDays(b.checkIn, day - 1) : ''; }
+  var MEALS = ['Breakfast', 'Lunch', 'Dinner'];
+  /* Bill summary of food and services: food as one total per day, services per head and day. Empty days are left out.
+     Lines without a day (older bookings, "whole stay" extras) keep their own name. */
+  function billLines(b) {
+    var food = {}, other = {}, order = [], out = { food: [], other: [] };
+    chargeLines(b).forEach(function (c) {
+      var amt = num(c.amount); if (!amt) return;
+      var day = Math.round(num(c.day));
+      if (c.type === 'Food') {
+        var k = day > 0 ? 'd' + day : 'n:' + (c.name || 'Food & beverages');
+        if (!food[k]) { food[k] = { day: day, date: dayDate(b, day), name: day > 0 ? 'Day ' + day : (c.name || 'Food & beverages'), amount: 0 }; order.push(['f', k]); }
+        food[k].amount = r2(food[k].amount + amt);
+      } else {
+        var nm = String(c.name || 'Other services').trim() || 'Other services', k2 = nm.toLowerCase() + '|' + (day > 0 ? day : 0);
+        if (!other[k2]) { other[k2] = { day: day, date: dayDate(b, day), head: nm, name: nm + (day > 0 ? ' · Day ' + day : ''), amount: 0 }; order.push(['o', k2]); }
+        other[k2].amount = r2(other[k2].amount + amt);
+      }
+    });
+    function byDay(a, z) { return (a.day || 99) - (z.day || 99); }
+    out.food = Object.keys(food).map(function (k) { return food[k]; }).sort(byDay);
+    var heads = [];
+    Object.keys(other).forEach(function (k) { if (heads.indexOf(other[k].head) < 0) heads.push(other[k].head); });
+    heads.forEach(function (h0) { Object.keys(other).map(function (k) { return other[k]; }).filter(function (x) { return x.head === h0; }).sort(byDay).forEach(function (x) { out.other.push(x); }); });
+    return out;
+  }
+  /* ---------- Menu (Athulyam Food Menu 2026). price null = MRP (enter on the bill). unit kg = cooking charge per kg ---------- */
+  var MENU_DEFAULT = (function () {
+    var L = [
+      ['Breakfast', 'Aloo Parantha with curd', 70, 'aloo paratha|alu paratha|aloo prantha|आलू पराठा|आलू परांठा'],
+      ['Breakfast', 'Plain Parantha', 30, 'plain paratha|paratha|पराठा|सादा पराठा'],
+      ['Breakfast', 'Puri with Sabji (4 pcs)', 120, 'puri sabji|poori sabji|puri|पूरी सब्जी|पूरी'],
+      ['Breakfast', 'Tawa Roti with Sabji (4 pcs)', 120, 'roti sabji|रोटी सब्जी'],
+      ['Breakfast', 'Poha', 100, 'पोहा'],
+      ['Breakfast', 'Omelete', 60, 'omelette|omlet|omlette|ऑमलेट|आमलेट'],
+      ['Breakfast', 'Bread Omelete', 70, 'bread omelette|bread omlet|ब्रेड ऑमलेट|ब्रेड आमलेट'],
+      ['Breakfast', 'Egg Bhurji', 60, 'anda bhurji|bhurji|अंडा भुर्जी|भुर्जी'],
+      ['Breakfast', 'Maggi', 60, 'maggie|मैगी'],
+      ['Snacks / Starters', 'Aloo Pyaz Pakode', 120, 'pakode|pakora|pakoda|aloo pyaz pakora|पकोड़े|पकौड़े|पकोडे'],
+      ['Snacks / Starters', 'Peanut Chat', 120, 'peanut chaat|मूंगफली चाट'],
+      ['Snacks / Starters', 'Crispy Corn', 150, 'corn|क्रिस्पी कॉर्न'],
+      ['Snacks / Starters', 'Chilli Paneer', 210, 'chili paneer|चिली पनीर'],
+      ['Snacks / Starters', 'Chilli Chicken', 250, 'chili chicken|चिली चिकन'],
+      ['Snacks / Starters', 'Chicken Pakode', 210, 'chicken pakora|chicken pakoda|चिकन पकोड़े'],
+      ['Snacks / Starters', 'Paneer Chaat', 200, 'paneer chat|पनीर चाट'],
+      ['Snacks / Starters', 'Egg Fried Rice', 150, 'fried rice|एग फ्राइड राइस'],
+      ['Snacks / Starters', 'Green Salad', 80, 'salad|सलाद'],
+      ['Snacks / Starters', '2 Boiled Eggs', 50, 'boiled egg|boiled eggs|egg|उबले अंडे|अंडा'],
+      ['Snacks / Starters', 'Papad', 40, 'पापड़|पापड'],
+      ['Snacks / Starters', 'Masala Papad', 60, 'मसाला पापड़|मसाला पापड'],
+      ['Main course', 'Matar Paneer (gravy)', 200, 'matar paneer|mutter paneer|मटर पनीर'],
+      ['Main course', 'Matar Mushroom', 200, 'mushroom|मटर मशरूम|मशरूम'],
+      ['Main course', 'Paneer Veg (dry)', 250, 'paneer dry|paneer veg|पनीर'],
+      ['Main course', 'Mix Veg', 150, 'mixed veg|मिक्स वेज'],
+      ['Main course', 'Aloo Jeera', 130, 'jeera aloo|aloo zeera|जीरा आलू|आलू जीरा'],
+      ['Main course', 'Aloo Matar', 150, 'aloo mutter|आलू मटर'],
+      ['Main course', 'Yellow Dal Fry', 150, 'dal fry|daal fry|dal|दाल फ्राई|दाल'],
+      ['Main course', 'Chicken Desi (gravy)', 300, 'desi chicken|chicken curry|chicken gravy|देसी चिकन|चिकन करी'],
+      ['Main course', 'Chicken Dry', 300, 'चिकन ड्राई'],
+      ['Thali', 'Veg Thali', 200, 'thali|veg thali|वेज थाली|थाली'],
+      ['Thali', 'Chicken Thali', 350, 'चिकन थाली'],
+      ['Thali', 'Mutton Thali', 500, 'मटन थाली'],
+      ['Pahadi cuisine', 'Phanu', 180, 'fanu|फाणु|फानू'],
+      ['Pahadi cuisine', 'Kaafuli (Spinach Curry)', 220, 'kafuli|kaafli|kafli|काफुली|काफली'],
+      ['Pahadi cuisine', 'Bhatt ki Dal', 180, 'bhat dal|bhatt dal|भट्ट की दाल|भट की दाल'],
+      ['Pahadi cuisine', 'Gahat ki Dal', 200, 'gahat dal|गहत की दाल|गहत'],
+      ['Pahadi cuisine', 'Aaloo ke Gutke', 150, 'aloo gutke|aloo ke gutke|आलू के गुटके|गुटके'],
+      ['Pahadi cuisine', 'Thechwani', 180, 'thechwani|थेचवानी'],
+      ['Pahadi cuisine', 'Buransh Juice', 60, 'buransh|बुरांश जूस|बुरांश'],
+      ['Pahadi cuisine', 'Jhangore ki Kheer', 110, 'jhangora kheer|jhangore kheer|झंगोरे की खीर|झंगोरा'],
+      ['Pahadi cuisine', 'Kheer', 100, 'खीर'],
+      ['Pahadi cuisine', 'Pallar', 60, 'pallar|पल्लर'],
+      ['Roti / Rice / Raita', 'Tawa Roti', 12, 'roti|chapati|chapatti|रोटी|चपाती'],
+      ['Roti / Rice / Raita', 'Butter Roti', 15, 'बटर रोटी'],
+      ['Roti / Rice / Raita', 'Rice', 80, 'plain rice|chawal|चावल|राइस'],
+      ['Roti / Rice / Raita', 'Jeera Rice', 120, 'zeera rice|जीरा राइस|जीरा चावल'],
+      ['Roti / Rice / Raita', 'Veg Pulao', 175, 'pulao|pulav|पुलाव'],
+      ['Roti / Rice / Raita', 'Plain Curd', 50, 'curd|dahi|दही'],
+      ['Roti / Rice / Raita', 'Mix Raita', 80, 'raita|रायता'],
+      ['Beverages', 'Tea', 25, 'chai|chay|चाय'],
+      ['Beverages', 'Lemon Tea', 30, 'lemon chai|नींबू चाय'],
+      ['Beverages', 'Coffee', 50, 'cofee|कॉफी|काफी'],
+      ['Beverages', 'Nimbu Pani', 50, 'lemon water|nimbu|नींबू पानी|निम्बू पानी'],
+      ['Beverages', 'Mineral Water', null, 'water|bisleri|पानी|बिसलेरी'],
+      ['Beverages', 'Soft Drink', null, 'cold drink|coke|pepsi|sprite|कोल्ड ड्रिंक'],
+      ['Cooking charges (per kg)', 'Cooking: Chicken', 300, 'chicken cooking|चिकन बनाई|चिकन पकाई', 'kg'],
+      ['Cooking charges (per kg)', 'Cooking: Mutton', 400, 'mutton cooking|मटन बनाई', 'kg'],
+      ['Cooking charges (per kg)', 'Cooking: Fish', 250, 'fish cooking|fish|मछली', 'kg'],
+      ['Cooking charges (per kg)', 'Cooking: Paneer', 250, 'paneer cooking|पनीर बनाई', 'kg']
+    ];
+    return L.map(function (x, i) { return { id: 'm' + String(i + 1).padStart(3, '0'), cat: x[0], name: x[1], price: x[2], aliases: x[3] ? x[3].split('|') : [], unit: x[4] || '' }; });
+  })();
+  function menuOf(settings) { var m = (settings || {}).menu; return m && m.length ? m : MENU_DEFAULT; }
+
+  /* ---------- Reading a handwritten food bill (text from Google Drive OCR) ---------- */
+  var DEV_DIGITS = '०१२३४५६७८९';
+  function normText(s) {
+    s = String(s || '').replace(/[०-९]/g, function (d) { return String(DEV_DIGITS.indexOf(d)); });
+    s = s.toLowerCase().normalize('NFC').replace(/[़]/g, '');           // drop nukta
+    s = s.replace(/(\d)\.(\d)/g, '$1․$2').replace(/[^a-z0-9ऀ-ॿ․ ]+/g, ' ').replace(/․/g, '.');
+    s = s.replace(/aa/g, 'a').replace(/ee/g, 'i').replace(/oo/g, 'u').replace(/ph/g, 'f').replace(/w/g, 'v').replace(/z/g, 'j').replace(/([a-z])h\b/g, '$1');
+    return s.replace(/\s+/g, ' ').trim();
+  }
+  function bigrams(s) { s = ' ' + s.replace(/ /g, '  ') + ' '; var o = {}; for (var i = 0; i < s.length - 1; i++) { var g = s.substr(i, 2); o[g] = (o[g] || 0) + 1; } return o; }
+  function dice(a, b) {
+    if (!a || !b) return 0; if (a === b) return 1;
+    var A = bigrams(a), B = bigrams(b), inter = 0, na = 0, nb = 0;
+    Object.keys(A).forEach(function (k) { na += A[k]; if (B[k]) inter += Math.min(A[k], B[k]); });
+    Object.keys(B).forEach(function (k) { nb += B[k]; });
+    return 2 * inter / (na + nb);
+  }
+  /* Best menu (or service) match for a written name: { entry, score }. */
+  function matchItem(text, settings) {
+    var t = normText(text); if (!t) return { entry: null, score: 0 };
+    var pool = menuOf(settings).map(function (m) { return { e: m, type: 'Food' }; })
+      .concat(((settings || {}).services || []).filter(function (v) { return v.name; }).map(function (v) { return { e: { id: 'svc:' + v.name, name: v.name, price: num(v.rate) || null, aliases: [] }, type: 'Other' }; }));
+    var best = { entry: null, score: 0, type: 'Food' };
+    pool.forEach(function (p) {
+      [p.e.name].concat(p.e.aliases || []).forEach(function (n) {
+        var nn = normText(n.replace(/\(.*?\)/g, ''));
+        var sc = Math.max(dice(t, nn), t.indexOf(nn) >= 0 && nn.length >= 4 ? 0.9 - Math.min(0.2, (t.length - nn.length) / 40) : 0);
+        if (sc > best.score) best = { entry: p.e, score: sc, type: p.type };
+      });
+    });
+    return best;
+  }
+  var MEAL_WORDS = [['Breakfast', /breakfast|break fast|नाश्ता|नाश्ते/], ['Lunch', /lunch|दोपहर|लंच/], ['Dinner', /dinner|रात|डिनर/], ['Snacks', /snack|evening|शाम/]];
+  function dayFromLine(t, b, days) {
+    var m = t.match(/(?:\bday|\bd|दिन)\s*[-:#.]?\s*(\d{1,2})\b/);
+    if (m && +m[1] >= 1 && +m[1] <= (days || 31)) return +m[1];
+    var dm = t.match(/\b(\d{1,2})\s*[\/.\-]\s*(\d{1,2})(?:\s*[\/.\-]\s*(\d{2,4}))?\b/);
+    if (dm && isDate(b.checkIn)) {
+      var yr = dm[3] ? (dm[3].length === 2 ? '20' + dm[3] : dm[3]) : b.checkIn.slice(0, 4);
+      var d = yr + '-' + String(+dm[2]).padStart(2, '0') + '-' + String(+dm[1]).padStart(2, '0');
+      if (isDate(d)) { var n = nights(b.checkIn, d) + 1; if (n >= 1 && n <= days) return n; }
+    }
+    return 0;
+  }
+  /* Turn OCR text into bill lines with red flags.
+     flags: item (not recognised / unsure), qty (no quantity read), price (no price, or differs from the menu), math (qty × rate ≠ amount), day (no day read). */
+  function parseBill(text, b, settings, opt) {
+    opt = opt || {}; var days = stayDays(b) || 1, out = { lines: [], total: null, sum: 0, flags: [] };
+    var curDay = num(opt.day) || 0, curMeal = opt.meal || '';
+    String(text || '').split(/\r?\n/).forEach(function (raw) {
+      var lo = String(raw || '').replace(/[०-९]/g, function (x) { return String(DEV_DIGITS.indexOf(x)); }).toLowerCase();
+      var d = dayFromLine(lo, b, days);
+      if (d) { curDay = d; curMeal = ''; lo = lo.replace(/(?:\bday|\bd|दिन)\s*[-:#.]?\s*\d{1,2}\b/, ' ').replace(/\b\d{1,2}\s*[\/.\-]\s*\d{1,2}(?:\s*[\/.\-]\s*\d{2,4})?\b/, ' ').replace(/\bdate\b|तारीख|दिनांक/g, ' '); }
+      MEAL_WORDS.forEach(function (mw) { if (mw[1].test(lo)) { curMeal = mw[0]; lo = lo.replace(mw[1], ' '); } });
+      var t = normText(lo); if (!t) return;
+      if (/\b(total|g total|grand|net|amount)\b|कुल|टोटल|योग/.test(t)) { var tn = t.match(/\d+(?:\.\d+)?/g); if (tn) out.total = num(tn[tn.length - 1]); return; }
+      if (/^(s ?no|sr|item|qty|rate|amt|particulars|athulyam|bill|date|name|room)\b/.test(t) && !/\d{2,}/.test(t)) return;
+      var nums = (t.match(/\d+(?:\.\d+)?/g) || []).map(Number), words = t.replace(/\d+(?:\.\d+)?/g, ' ').replace(/\b(x|rs|inr|pcs|pc|plate|plt|kg|nos|no)\b/g, ' ').replace(/\s+/g, ' ').trim();
+      if (!words || words.replace(/[^a-zऀ-ॿ]/g, '').length < 2) return;   // numbers only: not an item
+      var lead = raw.replace(/[०-९]/g, function (x) { return String(DEV_DIGITS.indexOf(x)); }).trim().match(/^(\d+(?:\.\d+)?)\s*(?:x|×|\*)?\s*[^\d\s]/i);
+      var mt = matchItem(words, settings), e = mt.entry, price = e && e.price != null ? num(e.price) : null;
+      var L = { raw: raw.trim(), read: words, item: e && mt.score >= 0.55 ? e.id : '', name: e && mt.score >= 0.55 ? e.name : words, type: e && mt.score >= 0.55 ? mt.type : 'Food',
+        unit: e && e.unit || '', qty: 1, rate: price != null ? price : 0, amount: 0, day: curDay, meal: curMeal || 'Other', flags: [], score: Math.round(mt.score * 100) / 100, menuPrice: price };
+      if (!L.item || mt.score < 0.8) L.flags.push('item');
+      var q = null, rate = null, amt = null;
+      if (lead) { q = +lead[1]; nums = nums.slice(1); }
+      if (nums.length >= 3) { q = q == null ? nums[0] : q; rate = nums[nums.length - 2]; amt = nums[nums.length - 1]; }
+      else if (nums.length === 2) {
+        if (q != null) { rate = nums[0]; amt = nums[1]; }
+        else if (price && Math.abs(nums[0] * price - nums[1]) < 0.5) { q = nums[0]; amt = nums[1]; }
+        else if (price && nums[0] === price) { rate = nums[0]; amt = nums[1]; q = r2(amt / price); }
+        else { q = nums[0]; amt = nums[1]; }
+      } else if (nums.length === 1) {
+        var n0 = nums[0];
+        if (q != null) amt = n0;
+        else if (price && n0 >= price && Math.abs(n0 / price - Math.round(n0 / price)) < 0.001) { q = Math.round(n0 / price); amt = n0; }
+        else if ((price || (price == null && L.item)) && n0 <= 20 && !L.unit) { q = n0; }
+        else amt = n0;
+      }
+      if (q == null || !(q > 0)) { q = 1; if (amt == null && rate == null) L.flags.push('qty'); }
+      L.qty = q;
+      if (rate == null) rate = amt != null ? r2(amt / q) : (price != null ? price : 0);
+      if (amt == null) amt = r2(q * rate);
+      L.rate = r2(rate); L.amount = r2(amt);
+      if (nums.length >= 3 && Math.abs(L.qty * L.rate - L.amount) > 0.5) L.flags.push('math');
+      if (!L.rate && !L.amount) L.flags.push('price');
+      else if (price != null && L.item && Math.abs(L.rate - price) > 0.5) L.flags.push('price');
+      else if (price == null && L.item && !L.amount) L.flags.push('price');
+      if (!L.day) L.flags.push('day');
+      out.lines.push(L);
+    });
+    out.sum = sum(out.lines, function (l) { return l.amount; });
+    if (out.total != null && Math.abs(out.total - out.sum) > 0.5) out.flags.push('total');
+    if (!out.lines.length) out.flags.push('empty');
+    return out;
+  }
+  var FLAG_TEXT = { item: 'Item not recognised for sure: choose it from the menu or type the name', qty: 'Quantity not read', price: 'Price missing or not the menu price', math: 'Qty × rate does not match the amount on the bill', day: 'Day not read: choose the day' };
+  function flagText(l, f) {
+    if (f === 'price' && l.menuPrice != null && num(l.rate) !== num(l.menuPrice)) return 'Price ₹' + num(l.rate) + ' is not the menu price ₹' + num(l.menuPrice);
+    if (f === 'price' && l.menuPrice == null && l.item) return 'MRP item: enter the price';
+    if (f === 'math') return 'Bill says ' + num(l.qty) + ' × ' + num(l.rate) + ' = ' + num(l.amount) + ' (should be ' + r2(num(l.qty) * num(l.rate)) + ')';
+    return FLAG_TEXT[f] || f;
+  }
+  function flaggedLines(b) { return (b.charges || []).filter(function (c) { return (c.flags || []).length; }); }
+
+  /* Itemised extra charges: lines of { type: 'Food' | 'Other', name, amount, day?, meal?, qty?, rate? }. Totals feed the food / additional amounts. */
   function chargeLines(b) {
     if (b.charges && b.charges.length) return b.charges;
     var out = [];
@@ -901,32 +1107,42 @@ var AH = (function () {
     if (!b.charges) return b;
     b.food = r2(sum(b.charges.filter(function (c) { return c.type === 'Food'; }), function (c) { return c.amount; }));
     b.additional = r2(sum(b.charges.filter(function (c) { return c.type !== 'Food'; }), function (c) { return c.amount; }));
-    b.additionalNote = b.charges.filter(function (c) { return c.type !== 'Food'; }).map(function (c) { return c.name; }).filter(Boolean).join(', ');
+    var heads = []; b.charges.filter(function (c) { return c.type !== 'Food' && num(c.amount); }).forEach(function (c) { var n = String(c.name || '').trim(); if (n && heads.indexOf(n) < 0) heads.push(n); });
+    b.additionalNote = heads.join(', ');
     return b;
   }
   /* Required fields. Optional: email, notes, special requests, food/extras/discount/commission, company billing,
      children's ID, address of guests other than the main guest. Old-sheet stays are not forced to have IDs. */
-  function validateGuest(g, isMain, imported) {
-    var e = [], F = g.nationality === 'Foreign', child = g.type === 'Child';
-    function need(k, label) { if (!String(g[k] || '').trim()) e.push(label); }
-    need('name', 'Full name'); need('gender', 'Gender');
-    if (isMain) { need('phone', 'Mobile'); if (String(g.phone || '').replace(/\D/g, '').length < 10 && String(g.phone || '').trim()) e.push('Mobile (10+ digits)'); }
-    if (F) {
-      need('dob', 'Date of birth'); need('surname', 'Surname'); need('givenName', 'Given name'); need('country', 'Nationality (country)'); need('passportNo', 'Passport number');
-      need('passportPlace', 'Passport place of issue'); need('passportIssue', 'Passport issue date'); need('passportExpiry', 'Passport expiry');
-      need('visaNo', 'Visa number'); need('visaType', 'Visa type'); need('visaExpiry', 'Visa valid till');
-      need('homeAddress', 'Address in home country'); need('arrivedFrom', 'Arrived from'); need('arrivalIndia', 'Date of arrival in India'); need('nextPlace', 'Next destination');
-    } else if (!child && !imported) {
-      need('idType', 'ID type'); need('idNumber', 'ID number'); if (isMain) need('address', 'Address');
-    }
-    return e;
-  }
+  /* Version 1.7: guest details are all optional; only an impossible passport date pair is refused (checked on the form). */
+  function validateGuest(g, isMain, imported) { return []; }
   function validateCustom(b, settings) {
-    return ((settings || {}).customFields || []).filter(function (cf) { return cf.required && cf.label && !String(((b.custom || {})[cf.id]) || '').trim(); }).map(function (cf) { return cf.label; });
+    return [];
   }
 
   /* ---------- Two-way sync: merge two copies of the data, newest change of each record wins ---------- */
   var COLLS = ['bookings', 'payments', 'expenses', 'queries'];
+  /* ID photos and documents are only ever added (deletions are marked, not removed), so a newer edit made on a device
+     that had not seen a photo yet must not drop it: copy any document the losing copy has into the winning copy. */
+  function keepDocs(win, lose) {
+    if (win && lose && (lose.billDocs || []).length) {
+      win.billDocs = win.billDocs || []; var hb = {}; win.billDocs.forEach(function (d) { hb[d.id] = d; });
+      lose.billDocs.forEach(function (d) { var w = hb[d.id]; if (!w) win.billDocs.push(JSON.parse(JSON.stringify(d))); else { if (!w.driveId && d.driveId) { w.driveId = d.driveId; w.driveUrl = d.driveUrl; } if (d.deleted && !w.deleted) w.deleted = true; } });
+    }
+    var lg = {}; ((lose && lose.guests) || []).forEach(function (g) { lg[g.id] = g; });
+    ((win && win.guests) || []).forEach(function (g) {
+      var o = lg[g.id]; if (!o || !(o.docs || []).length) return;
+      g.docs = g.docs || [];
+      var have = {}; g.docs.forEach(function (d) { have[d.id] = d; });
+      o.docs.forEach(function (d) {
+        var w = have[d.id];
+        if (!w) g.docs.push(JSON.parse(JSON.stringify(d)));
+        else {
+          if (!w.driveId && d.driveId) { w.driveId = d.driveId; w.driveUrl = d.driveUrl; w.uploadedAt = d.uploadedAt; }
+          if (d.deleted && !w.deleted) { w.deleted = true; w.deletedAt = d.deletedAt; }
+        }
+      });
+    });
+  }
   function stampOf(r) { return String(r.updatedAt || r.createdAt || ''); }
   function syncMerge(base, inc) {
     base = base || {}; inc = inc || {};
@@ -939,8 +1155,8 @@ var AH = (function () {
         if (!r || !r.id) return;
         var cur = map[r.id];
         if (!cur) { map[r.id] = r; stats.fromOther++; }
-        else if (stampOf(r) >= stampOf(cur)) { if (stampOf(r) > stampOf(cur)) stats.fromOther++; map[r.id] = r; }
-        else stats.kept++;
+        else if (stampOf(r) > stampOf(cur)) { stats.fromOther++; if (k === 'bookings') keepDocs(r, cur); map[r.id] = r; }
+        else { stats.kept++; if (k === 'bookings') keepDocs(cur, r); }
       });
       out[k] = Object.keys(map).filter(function (id) { if (del[id]) { stats.deleted++; return false; } return true; }).map(function (id) { return map[id]; });
     });
@@ -1013,6 +1229,7 @@ var AH = (function () {
     var roomsTxt = roomsOf(b).map(function (r) { return roomNameIn(st, r.roomId); }).join(' + ') || '—';
     var meta = inv ? [['Invoice no.', b.invoiceNo || '(issued at check-out)'], ['Invoice date', fmtLong(b.invoiceDate || b.checkOut)], ['Booking ref.', b.no || '—'], ['Place of supply', B.stateName + ' (' + B.stateCode + ')']]
       : [['Booking ref.', b.no || '—'], ['Status', b.status === 'Cancelled' ? 'Cancelled' : 'Confirmed']];
+    if (kind === 'statement') return statementHtml(b, data, st, B, c, gs, main);
     var out = DOC_CSS + '<div class="ahdoc">' + letterhead(B, inv ? 'TAX INVOICE' : 'BOOKING CONFIRMATION', meta);
     function kv(k, v, cls) { return '<tr' + (cls ? ' class="' + cls + '"' : '') + '><td>' + h(k) + '</td><td>' + (v === '' || v == null ? '—' : v) + '</td></tr>'; }
     var gst = c.gst, cg = r2(gst / 2), sg = r2(gst - cg);
@@ -1021,11 +1238,13 @@ var AH = (function () {
       out += '<h3>Stay</h3><table class="grid kv">' + kv('Booking Reference Number', h(b.no || '—'), 'ref') + kv('Main guest', h(b.guestName)) + kv('Mobile', h(b.phone)) + (b.email ? kv('Email', h(b.email)) : '') +
         kv('Guests', h(num(b.adults) + ' adult' + (num(b.adults) === 1 ? '' : 's') + (num(b.children) ? ', ' + num(b.children) + ' child' + (num(b.children) === 1 ? '' : 'ren') : ''))) +
         kv('Check-in', h(fmtLong(b.checkIn)) + ' &nbsp;·&nbsp; from ' + h(B.checkInTime)) + kv('Check-out', h(fmtLong(b.checkOut)) + ' &nbsp;·&nbsp; by ' + h(B.checkOutTime)) +
-        kv('Nights', h(c.nights)) + kv('Room' + (roomsOf(b).length > 1 ? 's' : ''), h(roomsTxt)) + kv('Booked via', h(b.source)) + (b.specialRequests ? kv('Special requests', h(b.specialRequests)) : '') + '</table>';
+        kv('Nights', h(c.nights) + (stayLabel(b) ? ' (' + stayLabel(b) + ')' : '')) + kv('Room' + (roomsOf(b).length > 1 ? 's' : ''), h(roomsTxt)) + kv('Booked via', h(b.source)) + (b.specialRequests ? kv('Special requests', h(b.specialRequests)) : '') + '</table>';
       out += '<h3>Charges</h3><table class="grid">' +
-        (c.roomParts || []).map(function (p) { return '<tr><td>Room — ' + h(roomNameIn(st, p.roomId)) + ' (' + c.nights + ' night' + (c.nights === 1 ? '' : 's') + ')</td><td class="r">' + inr(p.charge, true) + '</td></tr>'; }).join('') +
-        chargeLines(b).map(function (x) { return '<tr><td>' + h(x.name || (x.type === 'Food' ? 'Food & beverages' : 'Other services')) + '</td><td class="r">' + inr(x.amount, true) + '</td></tr>'; }).join('') +
-        (c.discount ? '<tr><td>Less: discount</td><td class="r">−' + inr(c.discount, true) + '</td></tr>' : '') +
+        (c.roomParts || []).map(function (p) { return '<tr><td>Room — ' + h(roomNameIn(st, p.roomId)) + (stayLabel(b) ? ' (' + stayLabel(b) + ')' : '') + '</td><td class="r">' + inr(p.charge, true) + '</td></tr>'; }).join('') +
+        billLines(b).food.map(function (x) { return '<tr><td>Food — ' + h(x.name) + (x.date ? ' (' + h(fmtLong(x.date)) + ')' : '') + '</td><td class="r">' + inr(x.amount, true) + '</td></tr>'; }).join('') +
+        billLines(b).other.map(function (x) { return '<tr><td>' + h(x.name) + (x.date ? ' (' + h(fmtLong(x.date)) + ')' : '') + '</td><td class="r">' + inr(x.amount, true) + '</td></tr>'; }).join('') +
+        (r2(c.discount - num(c.extrasDiscount)) ? '<tr><td>Less: discount</td><td class="r">−' + inr(r2(c.discount - num(c.extrasDiscount)), true) + '</td></tr>' : '') +
+        (num(c.extrasDiscount) ? '<tr><td>Less: food & services discount</td><td class="r">−' + inr(c.extrasDiscount, true) + '</td></tr>' : '') +
         (c.coupon ? '<tr><td>Less: coupon ' + h(c.couponLabel) + '</td><td class="r">−' + inr(c.coupon, true) + '</td></tr>' : '') +
         (c.cancelFee ? '<tr><td>Cancellation charge</td><td class="r">' + inr(c.cancelFee, true) + '</td></tr>' : '') +
         '<tr class="tot"><td>Taxable value</td><td class="r">' + inr(c.taxable, true) + '</td></tr>' +
@@ -1040,12 +1259,14 @@ var AH = (function () {
       out += '<table style="margin-top:12px"><tr><td style="width:55%;padding:0 12px 0 0"><h3 style="margin-top:0">Billed to</h3><b>' + h(b.billTo || b.guestName) + '</b>' +
         (b.billTo && b.billTo !== b.guestName ? '<br>Guest: ' + h(b.guestName) : '') + (main.address ? '<br>' + h(main.address) : '') + (b.phone ? '<br>Mobile ' + h(b.phone) : '') + (b.email ? '<br>' + h(b.email) : '') +
         (b.billGstin ? '<br><b>GSTIN ' + h(b.billGstin) + '</b>' : '') + '</td>' +
-        '<td style="padding:0"><h3 style="margin-top:0">Stay</h3>Check-in: ' + h(fmtLong(b.checkIn)) + '<br>Check-out: ' + h(fmtLong(b.checkOut)) + '<br>Nights: ' + c.nights + '<br>Room' + (roomsOf(b).length > 1 ? 's' : '') + ': ' + h(roomsTxt) + '</td></tr></table>';
+        '<td style="padding:0"><h3 style="margin-top:0">Stay</h3>Check-in: ' + h(fmtLong(b.checkIn)) + '<br>Check-out: ' + h(fmtLong(b.checkOut)) + '<br>Nights: ' + c.nights + (stayLabel(b) ? ' (' + stayLabel(b) + ')' : '') + '<br>Room' + (roomsOf(b).length > 1 ? 's' : '') + ': ' + h(roomsTxt) + '</td></tr></table>';
       var rows = [], sh = c.taxable ? 1 : 0;
       (c.roomParts || []).forEach(function (p) { rows.push(['Room accommodation — ' + roomNameIn(st, p.roomId), B.sacRoom, c.nights || 1, p.taxable, p.rate, p.gst]); });
       /* each charge line gets its share of the food / other taxable value and GST */
+      var BL = billLines(b);
       ['Food', 'Other'].forEach(function (t) {
-        var ls = chargeLines(b).filter(function (x) { return (x.type === 'Food') === (t === 'Food'); }), tot = sum(ls, function (x) { return x.amount; });
+        var ls = (t === 'Food' ? BL.food.map(function (x) { return { name: 'Food & beverages — ' + x.name + (x.date ? ' (' + fmtLong(x.date) + ')' : ''), amount: x.amount }; })
+          : BL.other.map(function (x) { return { name: x.name + (x.date ? ' (' + fmtLong(x.date) + ')' : ''), amount: x.amount }; })), tot = sum(ls, function (x) { return x.amount; });
         var tx = t === 'Food' ? c.foodTaxable : c.otherTaxable, gt = t === 'Food' ? c.gstFood : c.gstOther, givenT = 0, givenG = 0;
         ls.forEach(function (x, i) {
           var last = i === ls.length - 1, a = last ? r2(tx - givenT) : r2(tx * num(x.amount) / (tot || 1)), g = last ? r2(gt - givenG) : r2(gt * num(x.amount) / (tot || 1));
@@ -1069,6 +1290,51 @@ var AH = (function () {
       out += '<table style="margin-top:14px"><tr><td style="padding:0" class="small">Tax payable on reverse charge: No<br>Place of supply: ' + h(B.stateName) + ' (' + h(B.stateCode) + ')<br>Check-in ' + h(B.checkInTime) + ' · Check-out ' + h(B.checkOutTime) + '</td>' +
         '<td style="padding:0;text-align:right;width:45%">For <b>' + h(B.legalName || B.name) + '</b><br><br><br>Authorised signatory</td></tr></table>';
     }
+    out += '<div class="foot">' + h(st.billFooter || 'Thank you for staying with us.') + '<br>' + h(B.name) + ' · ' + h(B.phone) + (B.website ? ' · ' + h(B.website) : '') + ' · GSTIN ' + h(B.gstin) + '</div></div>';
+    return out;
+  }
+
+  /* Food & services statement for the guest: what was ordered on which day, with prices.
+     b.stmtGst ticked → discount, taxable value, GST and total (same as the tax invoice); not ticked → items, discount and total. */
+  function statementLines(b) {
+    var days = {}, order = [];
+    chargeLines(b).forEach(function (cl) {
+      if (!num(cl.amount)) return;
+      var d = num(cl.day) > 0 ? Math.round(num(cl.day)) : 0;
+      if (!days[d]) { days[d] = []; order.push(d); }
+      var label = cl.kind === 'item' ? (cl.name || 'Item') : (cl.type === 'Food' && cl.meal && !cl.kind ? cl.meal + ' (per person)' : (cl.name || (cl.type === 'Food' ? 'Food & beverages' : 'Other services')));
+      days[d].push({ meal: cl.type === 'Food' ? (cl.meal || '') : 'Services', name: label, qty: cl.qty != null && cl.qty !== '' ? num(cl.qty) : 1, unit: cl.unit || '', rate: cl.rate != null && cl.rate !== '' ? num(cl.rate) : r2(num(cl.amount) / (num(cl.qty) || 1)), amount: r2(cl.amount), type: cl.type });
+    });
+    var MO = { Breakfast: 1, Lunch: 2, Snacks: 3, Dinner: 4, Other: 5, '': 5, Services: 6 };
+    return order.sort(function (x, y) { return (x || 99) - (y || 99); }).map(function (d) {
+      var ls = days[d].sort(function (p, q) { return (MO[p.meal] || 5) - (MO[q.meal] || 5); });
+      return { day: d, date: dayDate(b, d), lines: ls, total: sum(ls, function (l) { return l.amount; }) };
+    });
+  }
+  function statementHtml(b, data, st, B, c, gs, main) {
+    var withGst = !!b.stmtGst && !!b.gstOn, groups = statementLines(b);
+    var out = DOC_CSS + '<div class="ahdoc stmt">' + letterhead(B, 'FOOD & SERVICES STATEMENT', []) +
+      '<table class="grid kv" style="margin-top:10px"><tr class="ref"><td>Booking ref.</td><td>' + h(b.no || '—') + '</td></tr><tr><td>Guest</td><td>' + h(b.guestName || '—') + '</td></tr><tr><td>Stay</td><td>' + h(isDate(b.checkIn) ? fmtLong(b.checkIn) + ' – ' + fmtLong(b.checkOut) : '—') + (stayLabel(b) ? ' (' + stayLabel(b) + ')' : '') + '</td></tr><tr><td>Rooms</td><td>' + h(roomsOf(b).map(function (r) { return roomNameIn(st, r.roomId); }).join(' + ') || '—') + '</td></tr></table>';
+    if (!groups.length) out += '<p style="margin-top:14px">No food or services recorded on this booking.</p>';
+    out += groups.map(function (g) {
+      var lastMeal = null;
+      return '<h3>' + (g.day ? 'Day ' + g.day + (g.date ? ' · ' + h(fmtLong(g.date)) : '') : 'Whole stay') + '</h3><table class="grid"><tr><th>Item</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Amount</th></tr>' +
+        g.lines.map(function (l) {
+          var head = l.meal && l.meal !== lastMeal ? '<tr><td colspan="4" class="small" style="background:#f7f5ef"><b>' + h(l.meal) + '</b></td></tr>' : ''; lastMeal = l.meal;
+          return head + '<tr><td>' + h(l.name) + '</td><td class="r">' + h(String(l.qty)) + (l.unit ? ' ' + h(l.unit) : '') + '</td><td class="r">' + inr(l.rate, true) + '</td><td class="r">' + inr(l.amount, true) + '</td></tr>';
+        }).join('') + '<tr class="tot"><td colspan="3">' + (g.day ? 'Day ' + g.day + ' total' : 'Total') + '</td><td class="r">' + inr(g.total, true) + '</td></tr></table>';
+    }).join('');
+    var subF = r2(c.food + c.additional), ex = num(c.extrasDiscount), base = r2(subF - ex);
+    var gF = c.gstFood, gO = c.gstOther;
+    out += '<table class="grid" style="margin-top:12px"><tr class="tot"><td>Food & services</td><td class="r">' + inr(subF, true) + '</td></tr>' +
+      (ex ? '<tr><td>Less: discount</td><td class="r">−' + inr(ex, true) + '</td></tr>' : '') +
+      (withGst ? '<tr><td>Taxable value</td><td class="r">' + inr(r2(c.foodTaxable + c.otherTaxable), true) + '</td></tr>' +
+        (gF ? '<tr><td>GST on food @ ' + num(b.gstFoodRate) + '% (CGST ' + inr(r2(gF / 2), true) + ' + SGST ' + inr(r2(gF - r2(gF / 2)), true) + ')</td><td class="r">' + inr(gF, true) + '</td></tr>' : '') +
+        (gO ? '<tr><td>GST on services @ ' + num(b.gstOtherRate) + '% (CGST ' + inr(r2(gO / 2), true) + ' + SGST ' + inr(r2(gO - r2(gO / 2)), true) + ')</td><td class="r">' + inr(gO, true) + '</td></tr>' : '') +
+        '<tr class="grand"><td>Total</td><td class="r">' + inr(r2(c.foodTaxable + c.otherTaxable + gF + gO), true) + '</td></tr>'
+        : '<tr class="grand"><td>Total</td><td class="r">' + inr(r2(c.foodTaxable + c.otherTaxable), true) + '</td></tr>') + '</table>';
+    if (!withGst && b.gstOn && (gF || gO)) out += '<p class="small">Amounts are before GST. GST is shown on your tax invoice.</p>';
+    if (r2(c.discount - ex) || c.coupon) out += '<p class="small">Any discount on the whole booking is shown on the booking confirmation and tax invoice.</p>';
     out += '<div class="foot">' + h(st.billFooter || 'Thank you for staying with us.') + '<br>' + h(B.name) + ' · ' + h(B.phone) + (B.website ? ' · ' + h(B.website) : '') + ' · GSTIN ' + h(B.gstin) + '</div></div>';
     return out;
   }
@@ -1147,7 +1413,7 @@ var AH = (function () {
     formCPending: formCPending, merge: merge, validateBooking: validateBooking, autoRoomGstRate: autoRoomGstRate,
     rateCardTotal: rateCardTotal, activeRooms: activeRooms, paymentsFor: paymentsFor, inr: inr,
     DEFAULT_LOGO: DEFAULT_LOGO, BUSINESS_DEFAULTS: BUSINESS_DEFAULTS, fyKey: fyKey, isLegacyNo: isLegacyNo, nextBookingNo: nextBookingNo, numberBookings: numberBookings, invoiceNo: invoiceNo, needsInvoice: needsInvoice, assignInvoices: assignInvoices,
-    syncMerge: syncMerge, chargeLines: chargeLines, applyCharges: applyCharges, validateGuest: validateGuest, validateCustom: validateCustom, docHtml: docHtml, amountInWords: amountInWords, biz: biz, fmtLong: fmtLong, maskId: maskId, importOld: importOld, oldRoomRate: oldRoomRate, COLLS: COLLS
+    syncMerge: syncMerge, keepDocs: keepDocs, blockedIds: blockedIds, stayLabel: stayLabel, stayDays: stayDays, MENU_DEFAULT: MENU_DEFAULT, menuOf: menuOf, normText: normText, matchItem: matchItem, parseBill: parseBill, flagText: flagText, flaggedLines: flaggedLines, statementLines: statementLines, dayDate: dayDate, MEALS: MEALS, billLines: billLines, chargeLines: chargeLines, applyCharges: applyCharges, validateGuest: validateGuest, validateCustom: validateCustom, docHtml: docHtml, amountInWords: amountInWords, biz: biz, fmtLong: fmtLong, maskId: maskId, importOld: importOld, oldRoomRate: oldRoomRate, COLLS: COLLS
   };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = AH;
