@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var A = AH, inr = A.inr, num = A.num, r2 = A.r2;
-  var APP_VERSION = '2.0.2';
+  var APP_VERSION = '2.0.3';
 
   /* ---------- tiny helpers ---------- */
   function $(s, el) { return (el || document).querySelector(s); }
@@ -2575,12 +2575,120 @@
   /* ---------- MORE ---------- */
   routes.more = function () {
     var groups = [
-      ['Daily work', [['today', 'Today’s arrivals & departures', 'login'], ['housekeeping', 'Housekeeping board', 'broom'], ['cashclose', 'Daily cash close', 'wallet'], ['future', 'Future bookings', 'calendar'], ['pending', 'Pending payments', 'rupee']]],
+      ['Daily work', [['today', 'Today’s arrivals & departures', 'login'], ['housekeeping', 'Housekeeping board', 'broom'], ['cashclose', 'Daily cash close', 'wallet'], ['guestqr', 'Guest QR page (Wi-Fi, rules, menu)', 'qr'], ['future', 'Future bookings', 'calendar'], ['pending', 'Pending payments', 'rupee']]],
       ['Connections', [['reminders', 'Notifications & reminders', 'bell'], ['otacal', 'Airbnb, Booking.com & MMT calendars', 'link']]],
       ['Data & setup', [['backup', 'Backup & restore', 'shield'], ['importbk', 'Import old bookings', 'upload'], ['import', 'Import old queries', 'upload'], ['settings', 'Settings', 'settings'], ['about', 'Where my data is stored', 'info']]]];
     return { title: 'More', tab: 'more', html: groups.map(function (g) {
       return '<h2>' + g[0] + '</h2><div class="card list">' + g[1].map(function (i) { return '<a class="li" href="#/' + i[0] + '">' + icon(i[2]) + '<span>' + i[1] + '</span>' + icon('chev-right', 'end') + '</a>'; }).join('') + '</div>';
     }).join('') + '<p class="small center">Version ' + APP_VERSION + '</p>' };
+  };
+
+  /* ---------- Version 2.0.3: GUEST QR PAGE ----------
+     The guest page (guest.html) shows what is packed inside its QR link: Wi-Fi, timings, contact, house rules, notes,
+     location and review links; the menu has its own QR. No guest data, nothing fetched: reprint after changing details.
+     One card per property (e.g. Ranipokhri and Mini Villa have different Wi-Fi). */
+  function guestPages() {
+    var s = S();
+    if (!s.guestPages || !s.guestPages.length) s.guestPages = [newGuestPage(s.businessName || 'Athulyam Homes')];
+    return s.guestPages;
+  }
+  function newGuestPage(label) {
+    var s = S();
+    return { id: 'gp-' + uid().slice(0, 8), label: label, name: s.businessName || 'Athulyam Homes', welcome: 'We hope you have a lovely stay.', wifiName: '', wifiPass: '', wifiType: 'WPA',
+      checkIn: s.checkInTime || '', checkOut: s.checkOutTime || '', breakfast: '', phone: s.phone || '', rules: '', note: '', map: '', review: ((s.reviewLinks || {}).google) || '', menu: true, menuNote: '' };
+  }
+  function packLink(obj) {
+    var u8 = fflate.deflateSync(fflate.strToU8(JSON.stringify(obj)), { level: 9 }), bin = '';
+    for (var i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+    return new URL('guest.html', location.href.split('#')[0]).href + '#z=' + btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function clean(o) { Object.keys(o).forEach(function (k) { if (o[k] === '' || o[k] == null || (Array.isArray(o[k]) && !o[k].length)) delete o[k]; }); return o; }
+  function infoLink(g) {
+    return packLink(clean({ v: 1, n: g.name, w: g.welcome, ws: g.wifiName, wp: g.wifiPass, ci: g.checkIn, co: g.checkOut, b: g.breakfast, ph: g.phone,
+      r: String(g.rules || '').split('\n').map(function (x) { return x.replace(/^\s*[-•*\d.)]+\s*/, '').trim(); }).filter(Boolean), x: g.note, m: g.map, rv: g.review }));
+  }
+  function menuLink(g) {
+    var cats = [], idx = {};
+    menuList().forEach(function (m) { if (m.hidden) return; var c = m.cat || 'Menu'; if (idx[c] === undefined) { idx[c] = cats.length; cats.push([c, []]); } cats[idx[c]][1].push([m.name, num(m.price) || 0]); });
+    return packLink(clean({ v: 1, t: 'menu', n: g.name, ph: g.phone, g: g.menuNote, c: cats }));
+  }
+  function wifiText(g) {
+    function e(x) { return String(x || '').replace(/([\;,:"])/g, '\\$1'); }
+    return 'WIFI:T:' + (g.wifiPass ? (g.wifiType || 'WPA') : 'nopass') + ';S:' + e(g.wifiName) + ';' + (g.wifiPass ? 'P:' + e(g.wifiPass) + ';' : '') + ';';
+  }
+  /* long links use the lowest error level (smaller, easier to scan when printed); the short Wi-Fi code keeps M */
+  function qrSvg(text, cls) {
+    var q = qrcode(0, text.length > 120 ? 'L' : 'M');
+    try { q.addData(text, 'Byte'); q.make(); } catch (e) { q = qrcode(0, 'L'); q.addData(text, 'Byte'); q.make(); }
+    var n = q.getModuleCount(), d = '';
+    for (var r = 0; r < n; r++) for (var c = 0; c < n; c++) if (q.isDark(r, c)) d += 'M' + c + ' ' + r + 'h1v1h-1z';
+    return { n: n, svg: '<svg class="qr ' + (cls || '') + '" viewBox="-4 -4 ' + (n + 8) + ' ' + (n + 8) + '" shape-rendering="crispEdges" role="img" aria-label="QR code"><rect x="-4" y="-4" width="' + (n + 8) + '" height="' + (n + 8) + '" fill="#fff"/><path d="' + d + '" fill="#14261c"/></svg>' };
+  }
+  function qrBlock(title, sub, text, link) {
+    var q = qrSvg(text), dense = q.n > 89;
+    return '<div class="qrbox"><div class="qrimg">' + q.svg + '</div><div class="qrmeta"><b>' + esc(title) + '</b><small>' + esc(sub) + '</small>' +
+      (dense ? '<small class="warn-s">Dense code (' + q.n + '×' + q.n + '): print it at least 7 cm wide.</small>' : '') +
+      (link ? '<div class="actions"><a class="btn sm" href="' + esc(link) + '" target="_blank" rel="noopener">' + icon('eye') + 'Open</a><button type="button" class="btn sm" data-share="' + esc(link) + '">' + icon('link') + 'Share link</button></div>' : '') + '</div></div>';
+  }
+  routes.guestqr = function (arg) {
+    if (typeof qrcode === 'undefined' || typeof fflate === 'undefined') return { title: 'Guest QR page', tab: 'more', back: '#/more', html: '<div class="warn">This screen needs the <b>lib</b> folder and the new <b>index.html</b> from version 2.0.3. Upload them to GitHub, then reopen the app.</div>' };
+    var list = guestPages(), g = list.filter(function (x) { return x.id === arg; })[0] || list[0];
+    function inp(k, label, hint, extra) { return field(label, '<input name="' + k + '" value="' + esc(g[k] || '') + '"' + (extra || '') + '>', '', hint); }
+    var html = (list.length > 1 || true ? '<div class="chips wrap">' + list.map(function (x) { return '<a class="chip' + (x.id === g.id ? ' on' : '') + '" href="#/guestqr/' + x.id + '">' + esc(x.label) + '</a>'; }).join('') + '<button type="button" class="chip" id="gpadd">' + icon('plus') + 'Add property</button></div>' : '') +
+      '<div class="card"><h3>' + icon('info') + 'What guests see</h3><p class="small">Guests scan the QR in the room and get a page with these details. Everything is inside the QR itself: no guest data, works on any phone. <b>Print the QR again after you change anything here.</b></p>' +
+      '<form id="gqf" novalidate>' +
+      '<div class="two">' + inp('label', 'Card name (only for you)', '', ' placeholder="e.g. Ranipokhri"') + inp('name', 'Property name shown to guests') + '</div>' +
+      inp('welcome', 'Welcome line') +
+      '<div class="two">' + inp('wifiName', 'Wi-Fi name', '', ' autocomplete="off"') + inp('wifiPass', 'Wi-Fi password', '', ' autocomplete="off"') + '</div>' +
+      '<div class="three">' + inp('checkIn', 'Check-in') + inp('checkOut', 'Check-out') + inp('breakfast', 'Breakfast time', '', ' placeholder="e.g. 8–10 am"') + '</div>' +
+      inp('phone', 'Phone / WhatsApp for guests', 'Guests can call, message and send food orders here.', ' type="tel" inputmode="tel"') +
+      field('House rules (one per line)', '<textarea name="rules" rows="5" placeholder="e.g. Quiet hours 10 pm – 7 am&#10;No smoking inside the rooms">' + esc(g.rules || '') + '</textarea>') +
+      field('Good to know', '<textarea name="note" rows="3" placeholder="e.g. Hot water: switch on the geyser 15 minutes before. Nearby: Jolly Grant airport 10 min.">' + esc(g.note || '') + '</textarea>') +
+      '<div class="two">' + inp('map', 'Google Maps link', 'Must start with https://', ' type="url" inputmode="url"') + inp('review', 'Review link', 'Your Google review link.', ' type="url" inputmode="url"') + '</div>' +
+      '<label class="chk"><input type="checkbox" name="menu"' + (g.menu !== false ? ' checked' : '') + '> Separate QR for the food menu (prices from More → Settings → Menu; guests can order on WhatsApp)</label>' +
+      inp('menuNote', 'Menu note', '', ' placeholder="e.g. Please order 45 minutes ahead"') +
+      '<button class="btn primary big" type="submit">' + icon('check') + 'Save and make QR codes</button>' + (list.length > 1 ? '<button type="button" class="btn danger" id="gpdel">Remove this card</button>' : '') + '</form></div>' +
+      '<h2>QR codes <a class="more" href="#/guestqrprint/' + g.id + '">Print card ›</a></h2><div class="card qrlist">' +
+      qrBlock('Welcome page', 'Wi-Fi, timings, contact, house rules', infoLink(g), infoLink(g)) +
+      (g.wifiName ? qrBlock('Join Wi-Fi', 'Phone camera joins "' + g.wifiName + '" directly', wifiText(g)) : '') +
+      (g.menu !== false ? qrBlock('Food menu', menuList().length + ' items · order on WhatsApp', menuLink(g), menuLink(g)) : '') + '</div>';
+    return {
+      title: 'Guest QR page', tab: 'more', back: '#/more', html: html, after: function () {
+        var f = $('#gqf');
+        f.onsubmit = function (e) {
+          e.preventDefault();
+          ['label', 'name', 'welcome', 'wifiName', 'wifiPass', 'checkIn', 'checkOut', 'breakfast', 'phone', 'rules', 'note', 'map', 'review', 'menuNote'].forEach(function (k) { g[k] = String(f.elements[k].value || '').trim(); });
+          ['map', 'review'].forEach(function (k) { if (g[k] && !/^https:\/\//i.test(g[k])) { toast((k === 'map' ? 'Maps' : 'Review') + ' link must start with https:// — left out.', true); g[k] = ''; } });
+          g.menu = f.elements.menu.checked; g.label = g.label || g.name || 'Property';
+          save(); haptic(); toast('Saved. Print the new QR codes.'); render();
+        };
+        $('#gpadd').onclick = function () { var n = newGuestPage('Property ' + (list.length + 1)); list.push(n); save(); go('#/guestqr/' + n.id); };
+        var del = $('#gpdel'); if (del) del.onclick = function () { if (!confirm('Remove the card "' + g.label + '"? Printed QR codes keep working.')) return; S().guestPages = list.filter(function (x) { return x.id !== g.id; }); save(); go('#/guestqr'); };
+        $$('[data-share]').forEach(function (b) {
+          b.onclick = function () {
+            var u = b.dataset.share;
+            if (navigator.share) navigator.share({ title: g.name, url: u }).catch(function () {});
+            else (navigator.clipboard ? navigator.clipboard.writeText(u) : Promise.reject()).then(function () { toast('Link copied'); }).catch(function () { prompt('Copy this link:', u); });
+          };
+        });
+      }
+    };
+  };
+  routes.guestqrprint = function (arg) {
+    if (typeof qrcode === 'undefined' || typeof fflate === 'undefined') return routes.guestqr();
+    var g = guestPages().filter(function (x) { return x.id === arg; })[0] || guestPages()[0];
+    var mono = esc(String(g.name || 'A').trim().charAt(0));
+    function card(kind) {
+      var q, title, line, extra = '';
+      if (kind === 'info') { q = qrSvg(infoLink(g)); title = 'Welcome'; line = 'Scan for Wi-Fi, timings, house rules and to reach us'; }
+      else if (kind === 'wifi') { q = qrSvg(wifiText(g)); title = 'Wi-Fi'; line = 'Scan with your camera to join'; extra = '<div class="pc-wifi"><span>Network</span><b>' + esc(g.wifiName) + '</b>' + (g.wifiPass ? '<span>Password</span><b>' + esc(g.wifiPass) + '</b>' : '') + '</div>'; }
+      else { q = qrSvg(menuLink(g)); title = 'Food menu'; line = 'Scan to see the menu and order on WhatsApp'; }
+      return '<div class="pcard"><div class="pc-mono">' + mono + '</div><div class="pc-name">' + esc(g.name) + '</div><div class="pc-title">' + title + '</div><div class="pc-qr">' + q.svg + '</div><div class="pc-line">' + line + '</div>' + extra + '</div>';
+    }
+    var html = '<div class="actions noprint"><button class="btn primary" onclick="window.print()">' + icon('receipt') + 'Print / Save PDF</button><a class="btn" href="#/guestqr/' + g.id + '">Edit details</a></div>' +
+      '<p class="small noprint">Each card prints about 9 cm wide. Laminate and place one in each room.</p>' +
+      '<div class="pcards">' + card('info') + (g.wifiName ? card('wifi') : '') + (g.menu !== false ? card('menu') : '') + '</div>';
+    return { title: 'Print QR cards', tab: 'more', back: '#/guestqr/' + g.id, html: html };
   };
 
   /* ---------- PLATFORM CALENDARS (iCal) ---------- */

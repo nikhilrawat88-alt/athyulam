@@ -418,6 +418,22 @@ input:focus,select:focus,textarea:focus{outline:0;border-color:var(--gold);box-s
 .tag-prem,.tag-rep{display:inline-flex;align-items:center;gap:3px;font:700 10.5px var(--sans);text-transform:uppercase;letter-spacing:.05em;border-radius:20px;padding:2px 8px;vertical-align:2px;margin-left:4px}
 .tag-prem{background:linear-gradient(145deg,var(--gold2),var(--gold));color:#1d3a2b}.tag-prem .ic{width:11px;height:11px;margin:0;stroke-width:2.4}
 .tag-rep{background:var(--ok-soft);color:var(--ok)}.tag-rep .ic{width:11px;height:11px;margin:0;stroke-width:2.4}
+/* guest QR */
+.qrlist{padding:6px 16px}
+.qrbox{display:flex;gap:16px;align-items:center;padding:14px 0;border-top:1px solid var(--line2)}.qrbox:first-child{border-top:0}
+.qrimg{flex:none;width:132px;height:132px;border-radius:12px;overflow:hidden;border:1px solid var(--line);background:#fff}.qrimg svg{width:100%;height:100%;display:block}
+.qrmeta{min-width:0}.qrmeta b{display:block;font:600 16px var(--serif);color:var(--green-ink)}.qrmeta small{display:block;color:var(--muted);font-size:13px;margin-top:2px}.qrmeta .actions{margin:10px 0 0}
+.warn-s{color:var(--amber)!important;font-weight:600}
+.pcards{display:flex;flex-wrap:wrap;gap:18px;justify-content:center}
+.pcard{width:9cm;background:#fffdf8;color:#1c231e;border-radius:18px;padding:22px 20px 20px;text-align:center;border:1px solid #e3dccb;box-shadow:var(--shadow);position:relative;overflow:hidden;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.pcard::before{content:"";position:absolute;left:0;right:0;top:0;height:6px;background:linear-gradient(90deg,#1d3a2b,#2b5641 40%,#b48e52)}
+.pc-mono{width:44px;height:44px;border-radius:50%;margin:4px auto 8px;display:flex;align-items:center;justify-content:center;background:linear-gradient(145deg,#c9a66b,#b48e52);color:#1d3a2b;font:600 22px var(--serif)}
+.pc-name{font:600 12px var(--sans);letter-spacing:.2em;text-transform:uppercase;color:#6a726b}
+.pc-title{font:600 28px/1.2 var(--serif);color:#1d3a2b;margin:4px 0 12px}
+.pc-qr{width:6.2cm;height:6.2cm;margin:0 auto;border-radius:12px;overflow:hidden;border:1px solid #e3dccb}.pc-qr svg{width:100%;height:100%;display:block}
+.pc-line{font-size:13.5px;color:#3c443e;margin-top:12px;line-height:1.4}
+.pc-wifi{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;text-align:left;margin:12px auto 0;background:#f4ecdc;border-radius:10px;padding:10px 12px;font-size:13px;max-width:7cm}.pc-wifi span{color:#6a726b}.pc-wifi b{font-family:ui-monospace,Menlo,monospace;word-break:break-all}
+@media print{.pcards{gap:12px}.pcard{box-shadow:none;break-inside:avoid;page-break-inside:avoid}main{padding:0!important}}
 /* cash close */
 .ccres{margin-top:4px;background:var(--soft);border-radius:var(--r-sm);padding:4px 12px}
 .ccres:empty{display:none}
@@ -549,6 +565,7 @@ body{padding-bottom:calc(var(--tabh) + env(safe-area-inset-bottom))}
 <symbol id="i-bank" viewBox="0 0 24 24"><path d="M3.5 9.5 12 4l8.5 5.5z"/><path d="M5.5 10v7.5M9.8 10v7.5M14.2 10v7.5M18.5 10v7.5M3.5 20h17"/></symbol>
 <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8.5c0-.8.7-1.5 1.5-1.5h2.3L9.3 5h5.4l1.5 2h2.3c.8 0 1.5.7 1.5 1.5v9.5c0 .8-.7 1.5-1.5 1.5h-13c-.8 0-1.5-.7-1.5-1.5z"/><circle cx="12" cy="13" r="3.5"/></symbol>
 <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3.6 2.6 5.3 5.8.8-4.2 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/></symbol>
+<symbol id="i-qr" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="6.5" height="6.5" rx="1"/><rect x="14" y="3.5" width="6.5" height="6.5" rx="1"/><rect x="3.5" y="14" width="6.5" height="6.5" rx="1"/><path d="M14 14h2.5v2.5H14zM18 18h2.5v2.5H18zM14 18.5v2M18.5 14h2"/></symbol>
 <symbol id="i-cart" viewBox="0 0 24 24"><path d="M3 4h2.5l2.2 11h10.6l2-7.5H6.4"/><circle cx="9.5" cy="19" r="1.4"/><circle cx="17" cy="19" r="1.4"/></symbol>
 </svg>
 <header>
@@ -576,6 +593,8 @@ body{padding-bottom:calc(var(--tabh) + env(safe-area-inset-bottom))}
 <div id="toast" role="status" aria-live="polite"></div>
 <noscript>Please turn on JavaScript to use this app.</noscript>
 <script src="logic.js"></script>
+<script src="lib/qr.js"></script>
+<script src="lib/fflate.js"></script>
 <script src="xlsx.js"></script>
 <script src="app.js"></script>
 </body>
