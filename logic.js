@@ -340,6 +340,37 @@ var AH = (function () {
     });
   }
 
+  /* ---------- v1.9.1: Airbnb / Booking.com / MakeMyTrip calendars (iCal) ----------
+     The Sheet reads each listing's calendar link and sends back the dates blocked there as data.ext.blocks:
+     { u: roomId, p: 'airbnb' | 'booking' | 'mmt', s: 'YYYY-MM-DD' (first night), e: 'YYYY-MM-DD' (check-out) }. */
+  var OTA = [{ id: 'airbnb', name: 'Airbnb' }, { id: 'booking', name: 'Booking.com' }, { id: 'mmt', name: 'MakeMyTrip' }];
+  function otaName(id) { var o = OTA.filter(function (x) { return x.id === id; })[0]; return o ? o.name : id; }
+  /* Calendar blocks that touch these rooms on these dates (the 4BHK counts as all its rooms). */
+  function extOverlaps(ext, cand, settings) {
+    if (!roomIds(cand).length || !isDate(cand.checkIn) || !isDate(cand.checkOut)) return [];
+    var mine = blockedIds(roomIds(cand), settings);
+    return (((ext || {}).blocks) || []).filter(function (x) { return x.s < cand.checkOut && cand.checkIn < x.e && mine.indexOf(x.u) >= 0; });
+  }
+  /* A block that is simply this booking seen from its own platform: same platform as the source, same room, same dates. */
+  function isOwnEcho(x, b) { return otaName(x.p) === b.source && roomIds(b).indexOf(x.u) >= 0 && x.s === b.checkIn && x.e === b.checkOut; }
+  /* Possible double bookings: an active booking in the app and a platform block on the same room and nights,
+     unless the block is that same booking on its own platform. */
+  function extConflicts(data, today) {
+    var out = [], st = data.settings || {};
+    (data.bookings || []).forEach(function (b) {
+      if (!isActive(b) || !isDate(b.checkOut) || b.checkOut <= today) return;
+      extOverlaps(data.ext, b, st).forEach(function (x) { if (!isOwnEcho(x, b) && x.e > today) out.push({ b: b, x: x }); });
+    });
+    return out;
+  }
+  /* Invoice numbers are permanent: if one copy of a booking has a 6-digit invoice number and the other has none
+     (a phone that had not heard about the invoice yet), keep the number. */
+  function keepInvoice(win, lose) {
+    if (!win || !lose) return;
+    var has = function (b) { return /-\d{6}$/.test(String(b.invoiceNo || '')); };
+    if (has(lose) && !has(win)) { win.invoiceNo = lose.invoiceNo; win.invoiceDate = lose.invoiceDate; }
+  }
+
   function futureBookings(data, today) {
     return (data.bookings || []).filter(function (b) {
       return b.checkIn >= today && (b.status === 'Confirmed' || b.status === 'Enquiry');
@@ -1155,8 +1186,8 @@ var AH = (function () {
         if (!r || !r.id) return;
         var cur = map[r.id];
         if (!cur) { map[r.id] = r; stats.fromOther++; }
-        else if (stampOf(r) > stampOf(cur)) { stats.fromOther++; if (k === 'bookings') keepDocs(r, cur); map[r.id] = r; }
-        else { stats.kept++; if (k === 'bookings') keepDocs(cur, r); }
+        else if (stampOf(r) > stampOf(cur)) { stats.fromOther++; if (k === 'bookings') { keepDocs(r, cur); keepInvoice(r, cur); } map[r.id] = r; }
+        else { stats.kept++; if (k === 'bookings') { keepDocs(cur, r); keepInvoice(cur, r); } }
       });
       out[k] = Object.keys(map).filter(function (id) { if (del[id]) { stats.deleted++; return false; } return true; }).map(function (id) { return map[id]; });
     });
@@ -1412,7 +1443,7 @@ var AH = (function () {
     payoutReport: payoutReport, overlaps: overlaps, futureBookings: futureBookings, paymentFlags: paymentFlags,
     formCPending: formCPending, merge: merge, validateBooking: validateBooking, autoRoomGstRate: autoRoomGstRate,
     rateCardTotal: rateCardTotal, activeRooms: activeRooms, paymentsFor: paymentsFor, inr: inr,
-    DEFAULT_LOGO: DEFAULT_LOGO, BUSINESS_DEFAULTS: BUSINESS_DEFAULTS, fyKey: fyKey, isLegacyNo: isLegacyNo, nextBookingNo: nextBookingNo, numberBookings: numberBookings, invoiceNo: invoiceNo, needsInvoice: needsInvoice, assignInvoices: assignInvoices,
+    DEFAULT_LOGO: DEFAULT_LOGO, BUSINESS_DEFAULTS: BUSINESS_DEFAULTS, fyKey: fyKey, isLegacyNo: isLegacyNo, nextBookingNo: nextBookingNo, numberBookings: numberBookings, OTA: OTA, otaName: otaName, extOverlaps: extOverlaps, isOwnEcho: isOwnEcho, extConflicts: extConflicts, keepInvoice: keepInvoice, invoiceNo: invoiceNo, needsInvoice: needsInvoice, assignInvoices: assignInvoices,
     syncMerge: syncMerge, keepDocs: keepDocs, blockedIds: blockedIds, stayLabel: stayLabel, stayDays: stayDays, MENU_DEFAULT: MENU_DEFAULT, menuOf: menuOf, normText: normText, matchItem: matchItem, parseBill: parseBill, flagText: flagText, flaggedLines: flaggedLines, statementLines: statementLines, dayDate: dayDate, MEALS: MEALS, billLines: billLines, chargeLines: chargeLines, applyCharges: applyCharges, validateGuest: validateGuest, validateCustom: validateCustom, docHtml: docHtml, amountInWords: amountInWords, biz: biz, fmtLong: fmtLong, maskId: maskId, importOld: importOld, oldRoomRate: oldRoomRate, COLLS: COLLS
   };
 })();

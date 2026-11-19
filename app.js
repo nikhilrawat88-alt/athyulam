@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var A = AH, inr = A.inr, num = A.num, r2 = A.r2;
-  var APP_VERSION = '1.8.0';
+  var APP_VERSION = '1.9.1';
 
   /* ---------- tiny helpers ---------- */
   function $(s, el) { return (el || document).querySelector(s); }
@@ -120,6 +120,16 @@
     };
   }
   var data = null, saving = Promise.resolve();
+  /* The 4BHK is the whole house: it must include Deluxe Double, Deluxe King Suite and Family Suite, or double bookings slip through.
+     Re-links only when the list is empty (v1.9 found it empty in live data). Newest settings win at sync, so the fix spreads. */
+  function relink4BHK(st) {
+    var big = (st.rooms || []).filter(function (r) { return /4\s*bhk/i.test(r.name); })[0];
+    if (!big || (big.includes || []).length) return false;
+    big.includes = (st.rooms || []).filter(function (r) { return r.id !== big.id && /deluxe\s*double|deluxe\s*king|family\s*suite/i.test(r.name); }).map(function (r) { return r.id; });
+    if (!big.includes.length) return false;
+    st.settingsAt = nowISO();
+    return true;
+  }
   function load() {
     return idbGet().then(function (d) {
       data = d || { settings: defaultSettings(), bookings: [], payments: [], expenses: [], queries: [], meta: { created: nowISO() } };
@@ -146,6 +156,12 @@
         if (big && !(big.includes || []).length) {
           big.includes = (s8.rooms || []).filter(function (r) { return /deluxe\s*double|deluxe\s*king|family\s*suite/i.test(r.name); }).map(function (r) { return r.id; });
         }
+        moved++;
+      }
+      if (!data.meta.v19) {
+        /* v1.9: the 4BHK's "includes" list was found empty, so it blocked none of its rooms. Re-link it once if empty. */
+        data.meta.v19 = nowISO(); var s9 = data.settings;
+        relink4BHK(s9);
         moved++;
       }
       if (!data.meta.v17) { data.meta.v17 = nowISO(); data.settings.mealRates = data.settings.mealRates || { Breakfast: 0, Lunch: 0, Dinner: 0 }; moved++; }
@@ -334,6 +350,10 @@
     var days = lb ? Math.floor((Date.now() - new Date(lb).getTime()) / 864e5) : null;
     if (data.bookings.length && (days === null || days >= num(S().backupDays || 7)) && !(data.meta.lastSync && (Date.now() - new Date(data.meta.lastSync).getTime()) / 864e5 < num(S().backupDays || 7)))
       out.push({ cls: 'amber', text: lb ? 'Backup overdue — last backup ' + days + ' days ago' : 'No backup yet — export one now', href: '#/backup' });
+    var xc = A.extConflicts(data, t);
+    if (xc.length) out.push({ cls: 'red', text: 'Possible double booking: ' + xc.length + ' stay' + (xc.length > 1 ? 's' : '') + ' in the app clash with dates blocked on ' + xc.map(function (c) { return A.otaName(c.x.p); }).filter(function (v, i, a) { return a.indexOf(v) === i; }).join(', '), href: '#/guest/' + xc[0].b.id });
+    var cfail = Object.keys(((data.ext || {}).status) || {}).filter(function (k) { return !data.ext.status[k].ok; });
+    if (cfail.length) out.push({ cls: 'amber', text: cfail.length + ' platform calendar link' + (cfail.length > 1 ? 's' : '') + ' could not be read at the last check', href: '#/otacal' });
     var dirty = S().rooms.filter(function (r) { return r.active !== false && r.clean === false; });
     if (dirty.length) out.push({ cls: 'grey', text: dirty.length + ' room' + (dirty.length > 1 ? 's' : '') + ' need cleaning: ' + dirty.map(function (r) { return r.name; }).join(', '), href: '#/calendar' });
     return out;
@@ -453,7 +473,7 @@
       '<div class="nights" id="nights"></div>' +
       '<div class="fld"><span>Rooms <small style="display:inline">— filled from the tariff × nights; type over it to change</small></span><div id="roomsBox"></div>' + (e.roomId ? '<em class="err">' + esc(e.roomId) + '</em>' : '') + '</div>' +
       '<div class="actions"><button type="button" class="btn sm" id="addRoom">＋ Add room</button><button type="button" class="btn sm" id="ratecard">Recalculate all from tariff</button></div>' +
-      '<div class="two">' + field('Booking source', '<select name="source">' + options(s.sources, b.source) + '</select>') +
+      '<div class="two">' + field('Booking source', '<select name="source">' + options(s.sources.filter(function (x) { return x !== 'Not recorded' || x === b.source; }), b.source) + '</select>') +
       field('Status', '<select name="status">' + options(A.STATUSES.concat(A.STATUSES.indexOf(b.status) < 0 ? [b.status] : []), b.status) + '</select>') + '</div>' +
       '<div id="overlap"></div></div>' +
 
@@ -469,7 +489,7 @@
       '<div class="two">' + field('Discount', '<input name="discount" type="number" inputmode="decimal" min="0" step="any" value="' + esc(b.discount) + '">', e.discount) +
       field('Platform commission', '<input name="commission" type="number" inputmode="decimal" min="0" step="any" value="' + esc(b.commission) + '">', e.commission, 'Your expense. Never added to or taken off the guest bill.') + '</div>' +
       couponFields(b, e) +
-      '<label class="chk"><input type="checkbox" name="gstOn"' + (b.gstOn ? ' checked' : '') + '> Charge GST on this bill</label>' +
+      '<label class="chk"><input type="checkbox" name="gstOn"' + (b.gstOn ? ' checked' : '') + '> Charge GST on this bill</label><div id="gstwarn"></div>' +
       '<div id="gstbox" class="three' + (b.gstOn ? '' : ' hide') + '">' +
       field('Room GST %', '<input name="gstRoomRate" type="number" inputmode="decimal" step="any" value="' + esc(b.gstRoomRate) + '">', '', 'Auto from the amount charged per room per night: up to ₹' + s.gstThreshold + ' → ' + s.gstRoomLow + '%, above → ' + s.gstRoomHigh + '%') +
       field('Food GST %', '<input name="gstFoodRate" type="number" inputmode="decimal" step="any" value="' + esc(b.gstFoodRate) + '">') +
@@ -736,6 +756,7 @@
       if (b.gstRateManual) b.rooms.forEach(function (r) { delete r.gstRate; });
       if (changedName === 'gstRoomRate') b.gstRateManual = true;
       $('#gstbox').classList.toggle('hide', !b.gstOn);
+      var gw = $('#gstwarn'); if (gw) gw.innerHTML = S().gstOn && !b.gstOn && A.isActive(b) ? '<div class="warn"><b>GST is off on this bill.</b> You are GST-registered: a room above ₹1,000/night normally carries GST. Only switch it off if your CA has told you to.</div>' : '';
       $('#cancelbox').classList.toggle('hide', b.status !== 'Cancelled');
       var cs = f.elements.couponSel.value; $('#couponCustom').classList.toggle('hide', cs !== 'pct' && cs !== 'amt');
       if (changedName === 'couponSel') { var lab = $('#couponCustom .fld > span'); if (lab) lab.textContent = cs === 'amt' ? 'Coupon amount ₹' : 'Coupon %'; if (!cs) f.elements.couponCode.value = ''; }
@@ -749,11 +770,14 @@
       /* Only redraw the warning when its text changes: redrawing while the guest taps the box (a blur on another field
          fires "change") destroyed the checkbox under the finger, so the tick never landed. */
       var ovMsg = ov.length && b.status !== 'Cancelled' ? esc(roomsLabel(b)) + ' is already taken by ' + ov.map(function (o) { return esc(gname(o)) + ' (' + esc(roomsLabel(o)) + ', ' + fmtShort(o.checkIn) + '–' + fmtShort(o.checkOut) + ', ' + esc(o.status) + ')'; }).join('; ') : '';
+      var xo = A.isActive(b) ? A.extOverlaps(data.ext, b, S()).filter(function (x) { return !A.isOwnEcho(x, b); }) : [];
+      if (!ov.length && xo.length) ovMsg = 'x:' + xo.map(function (x) { return A.otaName(x.p) + ' has ' + roomName(x.u) + ' blocked ' + fmtShort(x.s) + '–' + fmtShort(x.e); }).join('; ');
       var ovBox = $('#overlap');
-      if (ovBox.dataset.msg !== ovMsg) {
+      if (ovBox.dataset.msg !== ovMsg && /^x:/.test(ovMsg)) { ovBox.dataset.msg = ovMsg; ovBox.innerHTML = '<div class="warn"><b>Dates blocked on another platform.</b> ' + esc(ovMsg.slice(2)) + '. If this is that same booking, save it with the matching source. Otherwise these nights may already be sold.</div>'; }
+      else if (ovBox.dataset.msg !== ovMsg) {
         var wasTicked = (($('#override') || {}).checked);
         ovBox.dataset.msg = ovMsg;
-        ovBox.innerHTML = ovMsg ? '<div class="warn"><b>Double-booking warning.</b> ' + ovMsg + '.<label class="chk ovr"><input type="checkbox" id="override"' + (wasTicked ? ' checked' : '') + '> I understand — save anyway (override)</label></div>' : '';
+        ovBox.innerHTML = ovMsg ? '<div class="warn"><b>Room not available.</b> ' + ovMsg + '. Change the dates or room, or edit/cancel the other booking first.</div>' : '';
       }
     }
     f.addEventListener('input', function (ev) { if (ev.target.id !== 'override' && !ev.target.closest('#daysBox') && !ev.target.closest('#chargesBox')) refresh(ev.target.name); });
@@ -769,7 +793,7 @@
       ev.preventDefault();
       var b = readForm(), errs = A.validateBooking(b, S());
       var ov = A.overlaps(data.bookings, b, S());
-      if (ov.length && b.status !== 'Cancelled' && !(($('#override') || {}).checked) && A.isActive(b)) errs.override = 'Room already booked for these dates. Tick the override box to save anyway.';
+      if (ov.length && A.isActive(b)) errs.override = 'Room already booked for these dates (the 4BHK counts as all its rooms). Change the dates or room first.';
       formState.errors = errs;
       var keys = Object.keys(errs);
       $$('.err', f).forEach(function (x) { x.remove(); });
@@ -783,6 +807,10 @@
         var first = f.elements[keys[0]]; if (keys[0] !== 'override' && first && first.focus) first.focus(); else (keys[0] === 'override' ? $('#overlap') : $('#errsum')).scrollIntoView({ block: 'center' });
         return;
       }
+      var xo2 = A.isActive(b) ? A.extOverlaps(data.ext, b, S()).filter(function (x) { return !A.isOwnEcho(x, b); }) : [];
+      if (xo2.length && !confirm('These nights are blocked on ' + xo2.map(function (x) { return A.otaName(x.p) + ' (' + roomName(x.u) + ', ' + fmtShort(x.s) + '–' + fmtShort(x.e) + ')'; }).join(', ') + '.\n\nPress OK only if this is that same booking or you have checked the platform. Press Cancel to change the dates or room.')) return;
+      if (S().gstOn && !b.gstOn && A.isActive(b) && A.nights(b.checkIn, b.checkOut) > 0 && A.roomTotal(b) / A.nights(b.checkIn, b.checkOut) > 1000 &&
+          !confirm('Save this bill WITHOUT GST?\n\nYou are GST-registered and the room is above ₹1,000 per night. Only continue if your CA has confirmed no GST applies.')) return;
       ['adults', 'children'].forEach(function (k) { b[k] = Math.max(0, Math.round(num(b[k]))); });
       /* keep only food / service lines with something on them */
       b.charges = (b.charges || []).filter(function (c) { return num(c.day) > 0 || num(c.amount) || String(c.name || '').trim(); })
@@ -834,6 +862,9 @@
   function deleteBooking(id) {
     var b = booking(id);
     var np = data.payments.filter(function (p) { return p.bookingId === id; }).length;
+    if (np || b.invoiceNo || b.status === 'Checked In' || b.status === 'Checked Out') {
+      return toast('This booking has ' + (b.invoiceNo ? 'an invoice' : np ? 'payments' : 'a stay') + ' recorded, so it cannot be deleted. Set its status to Cancelled instead — the record is kept for your accounts.', true);
+    }
     if (!confirm('Delete the booking for ' + b.guestName + '?' + (np ? ' Its ' + np + ' payment record(s) will be deleted too.' : '') + ' This cannot be undone. (Tip: use status "Cancelled" instead if you want to keep a record.)')) return;
     data.bookings = data.bookings.filter(function (x) { return x.id !== id; });
     data.payments = data.payments.filter(function (p) { return p.bookingId !== id; });
@@ -949,6 +980,7 @@
         });
         $$('[data-delpay]').forEach(function (btn) {
           btn.onclick = function () {
+            if (b.invoiceNo) return toast('An invoice (' + b.invoiceNo + ') has been issued for this stay, so its payments cannot be deleted. Record a refund instead.', true);
             if (!confirm('Delete this payment record? This cannot be undone.')) return;
             data.payments = data.payments.filter(function (p) { return p.id !== btn.dataset.delpay; });
             b.updatedAt = nowISO(); save().then(function () { toast('Payment deleted'); render(); });
@@ -1875,6 +1907,8 @@
 
   /* ---------- ROOM CALENDAR + availability + cleaning ---------- */
   var calMonth = null;
+  /* Platform blocks covering this room on this night (the 4BHK counts as all its rooms). */
+  function extAt(roomId, ds) { return A.extOverlaps(data.ext, { rooms: [{ roomId: roomId }], checkIn: ds, checkOut: A.addDays(ds, 1) }, S()); }
   routes.calendar = function () {
     calMonth = calMonth || thisMonth();
     var s = S(), rooms = A.activeRooms(s), dim = A.daysInMonth(calMonth), t = today();
@@ -1888,14 +1922,18 @@
         var bk = data.bookings.filter(function (b) { return A.blockedIds(A.roomIds(b), s).indexOf(r.id) >= 0 && (A.isActive(b) || b.status === 'Enquiry') && A.isDate(b.checkIn) && b.checkIn <= ds && b.checkOut > ds; });
         if (bk.length) {
           var b = bk[0], startHere = b.checkIn === ds || d === 1;
-          cells += '<td class="occ ' + (bk.length > 1 ? 'clash' : statusClass(b.status)) + '"><a href="#/guest/' + b.id + '" title="' + esc(gname(b)) + '">' + (startHere ? esc((A.roomIds(b).indexOf(r.id) < 0 ? '↳' : '') + gname(b).split(' ')[0].slice(0, 6)) : '') + '</a></td>';
+          var xclash = A.isActive(b) && extAt(r.id, ds).some(function (x) { return !A.isOwnEcho(x, b); });
+          cells += '<td class="occ ' + (bk.length > 1 || xclash ? 'clash' : statusClass(b.status)) + '"><a href="#/guest/' + b.id + '" title="' + esc(gname(b)) + '">' + (startHere ? esc((A.roomIds(b).indexOf(r.id) < 0 ? '↳' : '') + gname(b).split(' ')[0].slice(0, 6)) : '') + '</a></td>';
+        } else if (extAt(r.id, ds).length) {
+          var xb = extAt(r.id, ds)[0];
+          cells += '<td class="occ ext"><a href="#/otacal" title="Blocked on ' + esc(A.otaName(xb.p)) + '">' + (xb.s === ds || d === 1 ? esc(A.otaName(xb.p).charAt(0)) : '') + '</a></td>';
         } else cells += '<td class="free"><a href="#/new/roomId=' + encodeURIComponent(r.id) + '&checkIn=' + ds + '" aria-label="Book ' + esc(r.name) + ' on ' + ds + '"></a></td>';
       }
       return '<tr>' + cells + '</tr>';
     }).join('');
     var html = '<div class="monthbar"><button class="btn sm" id="pm">‹</button><b>' + fmtMonth(calMonth) + '</b><button class="btn sm" id="nm">›</button></div>' +
       (rooms.length ? '<div class="calwrap"><table class="cal">' + head + body + '</table></div>' : empty('Add rooms in Settings first.', '<a class="btn" href="#/settings">Settings</a>')) +
-      '<p class="small legend"><span class="lg st-confirmed"></span>Confirmed <span class="lg st-checked-in"></span>In-house <span class="lg st-checked-out"></span>Left <span class="lg st-enquiry"></span>Enquiry <span class="lg clash"></span>Clash · Tap an empty cell to book.</p>' +
+      '<p class="small legend"><span class="lg st-confirmed"></span>Confirmed <span class="lg st-checked-in"></span>In-house <span class="lg st-checked-out"></span>Left <span class="lg st-enquiry"></span>Enquiry <span class="lg ext"></span>Blocked on Airbnb (A) / Booking.com (B) / MMT (M) <span class="lg clash"></span>Clash · Tap an empty cell to book.</p>' +
       '<h2>Room status today</h2>' + rooms.map(function (r) {
         var occ = data.bookings.filter(function (b) { return A.blockedIds(A.roomIds(b), s).indexOf(r.id) >= 0 && A.isActive(b) && A.isDate(b.checkIn) && b.checkIn <= t && b.checkOut > t; })[0];
         return '<div class="card roomrow"><div><b>' + esc(r.name) + '</b><br><small>' + (occ ? 'Occupied · ' + esc(gname(occ)) + (A.roomIds(occ).indexOf(r.id) < 0 ? ' (via ' + esc(roomsLabel(occ)) + ')' : '') : 'Available tonight') + '</small></div><button class="btn sm ' + (r.clean === false ? 'danger' : '') + '" data-clean="' + r.id + '">' + (r.clean === false ? 'Needs cleaning' : 'Clean ✓') + '</button></div>';
@@ -2160,9 +2198,53 @@
 
   /* ---------- MORE ---------- */
   routes.more = function () {
-    var items = [['today', 'Today’s arrivals & departures'], ['future', 'Future bookings'], ['pending', 'Pending payments'], ['reminders', 'Notifications & reminders'],
+    var items = [['today', 'Today’s arrivals & departures'], ['future', 'Future bookings'], ['pending', 'Pending payments'], ['reminders', 'Notifications & reminders'], ['otacal', 'Airbnb, Booking.com & MMT calendars'],
       ['backup', 'Backup & restore'], ['importbk', 'Import old bookings'], ['import', 'Import old queries'], ['settings', 'Settings'], ['about', 'Where my data is stored']];
     return { title: 'More', tab: 'more', html: items.map(function (i) { return '<a class="card navrow" href="#/' + i[0] + '"><b>' + i[1] + '</b></a>'; }).join('') + '<p class="small center">Version ' + APP_VERSION + '</p>' };
+  };
+
+  /* ---------- PLATFORM CALENDARS (iCal) ---------- */
+  routes.otacal = function () {
+    var s = S(), ext = data.ext || {}, key = ext.key, st = ext.status || {}, rooms = A.activeRooms(s);
+    function feed(r, p) { return s.syncUrl + '?page=ical&u=' + encodeURIComponent(r.id) + '&p=' + p + '&k=' + key + '&f=athulyam-' + String(r.name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '.ics'; }
+    function stat(r, p) {
+      var x = st[r.id + '|' + p]; if (!x) return '';
+      return x.ok ? '<small class="ok">Read ' + new Date(x.at).toLocaleString('en-IN') + ' · ' + x.n + ' blocked stay' + (x.n === 1 ? '' : 's') + '</small>'
+        : '<small class="warn">Could not read (' + esc(x.error) + ') at ' + new Date(x.at).toLocaleString('en-IN') + '. Keeping the last dates read' + (x.lastOk ? ' on ' + new Date(x.lastOk).toLocaleString('en-IN') : '') + '.</small>';
+    }
+    var html = '<div class="card"><h3>How it works</h3><p class="small">For each room and each platform there are two links. <b>1.</b> Copy the app’s link and paste it into that listing on the platform (Import calendar / Add calendar connection). Nights booked in the app, or on the other platforms, then show as not available there. <b>2.</b> Copy the platform’s own calendar link (Export calendar) and paste it below. The Sheet reads it every hour and at each sync, and those nights show in the room calendar (A / B / M).</p>' +
+      '<p class="small"><b>Not instant:</b> Airbnb reads calendars about every 3 hours (Refresh in Airbnb reads now), Booking.com every 30–60 minutes, the Sheet every hour. A booking made on two sites within that gap can still clash: the Home screen warns you when it sees one. Only dates are shared: no guest names, phones or amounts. Airbnb’s own “Not available” rules are ignored; block dates in the app instead.</p></div>' +
+      (!s.syncUrl ? '<div class="warn">Set up Cloud sync first (More → Settings).</div>' : !key ? '<div class="warn">Update the Sheet script to version 1.9.1, then tap Sync now. The links appear here after that.</div>' : '') +
+      '<form id="oc">' + rooms.map(function (r) {
+        return '<div class="card"><h3>' + esc(r.name) + '</h3>' + A.OTA.map(function (o) {
+          return '<details class="fld"><summary>' + esc(o.name) + ((r.ical || {})[o.id] ? ' · linked' : '') + '</summary>' +
+            (key && s.syncUrl ? '<label class="fld"><span>1. Paste into ' + esc(o.name) + '</span><div class="two"><input readonly value="' + esc(feed(r, o.id)) + '" data-feed><button type="button" class="btn sm" data-cp>Copy</button></div></label>' : '') +
+            field('2. ' + o.name + '’s calendar link for this room', '<input data-ic="' + esc(r.id) + '" data-p="' + o.id + '" value="' + esc((r.ical || {})[o.id] || '') + '" placeholder="https://… (from ' + esc(o.name) + ': Export calendar)" inputmode="url" autocomplete="off">') + stat(r, o.id) + '</details>';
+        }).join('') + '</div>';
+      }).join('') + '<button class="btn primary big" type="submit">Save links</button></form>' +
+      '<p class="small">The 4BHK link also shows nights booked in any of its rooms, and each room’s link shows nights the 4BHK is booked. Keep these links private: anyone with one can see which dates are taken.</p>';
+    return {
+      title: 'Platform calendars', tab: 'more', back: '#/more', html: html, after: function () {
+        $$('[data-cp]').forEach(function (x) {
+          x.onclick = function () {
+            var v = x.parentNode.querySelector('[data-feed]').value;
+            (navigator.clipboard ? navigator.clipboard.writeText(v) : Promise.reject()).then(function () { x.textContent = 'Copied'; setTimeout(function () { x.textContent = 'Copy'; }, 1200); })
+              .catch(function () { prompt('Copy this link:', v); });
+          };
+        });
+        $('#oc').onsubmit = function (ev) {
+          ev.preventDefault(); var bad = [];
+          $$('[data-ic]', this).forEach(function (el) {
+            var r = S().rooms.filter(function (x) { return x.id === el.dataset.ic; })[0], v = el.value.trim();
+            if (v && !/^https:\/\/\S+$/i.test(v)) { bad.push(r.name + ' · ' + A.otaName(el.dataset.p) + ': must start with https://'); return; }
+            if (v && /script\.google(usercontent)?\.com/i.test(v)) { bad.push(r.name + ' · ' + A.otaName(el.dataset.p) + ': this is the app’s own link — paste the platform’s link here'); return; }
+            r.ical = r.ical || {}; if (v) r.ical[el.dataset.p] = v; else delete r.ical[el.dataset.p];
+          });
+          if (bad.length) return toast(bad.join(' · '), true);
+          save().then(function () { toast('Links saved. The Sheet reads them at this sync and then every hour.'); if (S().syncUrl) syncNow(false); render(); });
+        };
+      }
+    };
   };
 
   /* ---------- REMINDERS ---------- */
@@ -2170,7 +2252,7 @@
     var r = S().reminders, synced = !!S().syncUrl;
     function hourSel(name, v) { var o = ''; for (var h = 0; h < 24; h++) o += '<option value="' + h + '"' + (Number(v) === h ? ' selected' : '') + '>' + (h % 12 || 12) + ':00 ' + (h < 12 ? 'AM' : 'PM') + '</option>'; return '<select name="' + name + '">' + o + '</select>'; }
     var html = '<div class="card"><h3>How reminders work on your phone</h3><p class="small">A home-screen web app cannot schedule its own notifications while it is closed, so this app does not pretend to. You get two reliable, free routes instead:</p>' +
-      '<p class="small"><b>1. Email reminders with your real numbers</b> — sent by your Google Sheet at the hours below (IST), within that hour. Gmail on your phone shows them as notifications. Needs the Sheet set up (Settings → Cloud sync) and at least one sync. Status: <b>' + (synced ? 'Sheet connected' : 'not set up yet') + '</b>.</p>' +
+      '<p class="small"><b>1. Email reminders with your real numbers</b> — sent by your Google Sheet at the hours below (IST), within that hour. Gmail on your phone shows them as notifications. Needs the Sheet set up (Settings → Cloud sync) and at least one sync. Status: <b>' + (synced ? 'Sheet connected' : 'not set up yet') + '</b>. They go to <b>' + esc(S().email || 'the Email in Settings (empty now: the Sheet owner’s Gmail is used)') + '</b>. Days with nothing to report send no arrivals or payments email. Untick “Email reminders on” to stop all of them.</p>' +
       '<p class="small"><b>2. iPhone/Android calendar alarms</b> — add the daily reminder events below to your phone calendar once. They ring even with no internet and remind you to open the app.</p></div>' +
       '<form id="rf" class="card"><h3>Reminder times (IST)</h3><label class="chk"><input type="checkbox" name="enabled"' + (r.enabled ? ' checked' : '') + '> Email reminders on</label>' +
       field('Today’s arrivals + Form C due', hourSel('arrivals', r.arrivals)) + field('Pending payments & unpaid advances', hourSel('payments', r.payments)) +
@@ -2204,22 +2286,47 @@
     };
   };
 
+  /* ---------- Encrypted backup file: AES-256-GCM, key from the password with PBKDF2-SHA256 (310,000 rounds). ---------- */
+  function b64(buf) { var s = '', a = new Uint8Array(buf); for (var i = 0; i < a.length; i += 32768) s += String.fromCharCode.apply(null, a.subarray(i, i + 32768)); return btoa(s); }
+  function unb64(t) { return Uint8Array.from(atob(t), function (c) { return c.charCodeAt(0); }); }
+  function backupKey(pw, salt, iter) {
+    return crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveKey']).then(function (k) {
+      return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: salt, iterations: iter, hash: 'SHA-256' }, k, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    });
+  }
+  function lockBackup(plain, pw) {
+    var salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12)), iter = 310000;
+    return backupKey(pw, salt, iter).then(function (key) { return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, new TextEncoder().encode(plain)); })
+      .then(function (ct) { return JSON.stringify({ app: 'athulyam-guest-manager', encrypted: true, v: 1, kdf: 'PBKDF2-SHA256', iterations: iter, salt: b64(salt), iv: b64(iv), data: b64(ct), exportedAt: nowISO(), version: APP_VERSION }); });
+  }
+  function unlockBackup(j, pw) {
+    if (!pw) return Promise.reject(new Error('This backup is encrypted. Enter its backup password.'));
+    return backupKey(pw, unb64(j.salt), j.iterations || 310000)
+      .then(function (key) { return crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(j.iv) }, key, unb64(j.data)); })
+      .then(function (pt) { return JSON.parse(new TextDecoder().decode(pt)); }, function () { throw new Error('Wrong backup password (or the file is damaged).'); });
+  }
+
   /* ---------- BACKUP & RESTORE ---------- */
   routes.backup = function () {
     var lb = data.meta.lastBackup, ls = data.meta.lastSync;
     var html = '<div class="card"><h3>Status</h3>' + row('Last backup file', lb ? fmtDate(lb.slice(0, 10)) : 'Never') + row('Last cloud sync', ls ? fmtDate(ls.slice(0, 10)) + ' ' + ls.slice(11, 16) + ' UTC' : 'Not set up') +
       row('Records', data.bookings.length + ' bookings · ' + data.queries.length + ' queries · ' + data.payments.length + ' payments · ' + data.expenses.length + ' expenses') + '</div>' +
-      '<div class="card"><h3>Backup file (JSON)</h3><p class="small">Contains everything: settings, rooms, bookings, guest details, payments and expenses. It is not encrypted, so save it somewhere private (your own Google Drive or iCloud Files) and never post it publicly.</p><button class="btn primary" id="bk">Export backup</button></div>' +
+      '<div class="card"><h3>Backup file (encrypted)</h3><p class="small">Contains everything: settings, rooms, bookings, guest details with ID numbers, payments and expenses. It is <b>locked with a password</b> you choose — without it nobody can read the file, including you, so keep the password safe.</p>' +
+      '<div class="two">' + field('Backup password (min 8)', '<input type="password" id="bpw1" autocomplete="new-password">') + field('Repeat password', '<input type="password" id="bpw2" autocomplete="new-password">') + '</div>' +
+      '<button class="btn primary" id="bk">Export encrypted backup</button></div>' + 
       '<div class="card"><h3>Restore</h3><p class="small"><b>Merge</b> adds missing records and updates older ones — nothing is duplicated, matched by record ID. <b>Replace</b> wipes this phone first.</p>' +
-      '<input type="file" id="rfile" accept=".json,application/json"><div class="actions"><button class="btn" id="rmerge">Merge from file</button><button class="btn danger" id="rrepl">Replace with file</button></div><div id="rmsg"></div></div>' +
+      '<input type="file" id="rfile" accept=".json,application/json">' + field('Backup password (for encrypted files)', '<input type="password" id="rpw" autocomplete="current-password">') + '<div class="actions"><button class="btn" id="rmerge">Merge from file</button><button class="btn danger" id="rrepl">Replace with file</button></div><div id="rmsg"></div></div>' +
       '<a class="card navrow" href="#/import"><b>Import old queries</b><small>From Numbers, Excel or Google Sheets</small></a>' +
       '<div class="card"><h3>Spreadsheet exports (CSV)</h3><div class="actions"><button class="btn" id="cb">Bookings</button><button class="btn" id="cp">Payments</button><button class="btn" id="ce">Expenses</button><button class="btn" id="cq">Queries</button><button class="btn" id="cgu">Guests & IDs</button></div></div>' +
       '<div class="card"><h3>Clear this device</h3><p class="small">Removes the records from this phone or laptop only, for example to start a second device fresh from your Google Sheet. Nothing is deleted from the Sheet or your other devices; Sync now downloads everything again. To delete a booking everywhere, open it and use Delete booking.</p><button class="btn danger" id="wipe">Clear this device</button></div>';
     return {
       title: 'Backup & restore', tab: 'more', back: '#/more', html: html, after: function () {
         $('#bk').onclick = function () {
-          var payload = JSON.stringify({ app: 'athulyam-guest-manager', version: APP_VERSION, exportedAt: nowISO(), settings: Object.assign({}, data.settings, { pinHash: '', pinSalt: '', syncToken: '' }), bookings: data.bookings, payments: data.payments, expenses: data.expenses, queries: data.queries }, null, 1);
-          deliverFile('athulyam-backup-' + today() + '.json', payload, 'application/json').then(function (ok) {
+          var pw = $('#bpw1').value;
+          if (pw.length < 8) return toast('Choose a backup password of at least 8 characters.', true);
+          if (pw !== $('#bpw2').value) return toast('The two passwords do not match.', true);
+          var plain = JSON.stringify({ app: 'athulyam-guest-manager', version: APP_VERSION, exportedAt: nowISO(), settings: Object.assign({}, data.settings, { pinHash: '', pinSalt: '', syncToken: '' }), bookings: data.bookings, payments: data.payments, expenses: data.expenses, queries: data.queries }, null, 1);
+          lockBackup(plain, pw).then(function (payload) { return deliverFile('athulyam-backup-' + today() + '.json', payload, 'application/json'); }).then(function (ok) {
             if (ok) { data.meta.lastBackup = nowISO(); save(true).then(function () { toast('Backup exported'); render(); }); }
           });
         };
@@ -2227,15 +2334,19 @@
           var f = $('#rfile').files[0]; if (!f) return toast('Choose a backup file first.', true);
           var rd = new FileReader();
           rd.onload = function () {
-            try { var j = JSON.parse(rd.result); if (j.app !== 'athulyam-guest-manager' || !Array.isArray(j.bookings)) throw new Error('This is not an Athulyam backup file.'); cb(j); }
-            catch (e) { $('#rmsg').innerHTML = '<div class="warn">' + esc(e.message) + '</div>'; }
+            var fail = function (e) { $('#rmsg').innerHTML = '<div class="warn">' + esc(e.message) + '</div>'; };
+            var j; try { j = JSON.parse(rd.result); } catch (e) { return fail(new Error('This is not an Athulyam backup file.')); }
+            (j && j.encrypted ? unlockBackup(j, $('#rpw').value) : Promise.resolve(j)).then(function (x) {
+              if (!x || x.app !== 'athulyam-guest-manager' || !Array.isArray(x.bookings)) throw new Error('This is not an Athulyam backup file.');
+              cb(x);
+            }).catch(fail);
           };
           rd.readAsText(f);
         }
         $('#rmerge').onclick = function () {
           readFile(function (j) {
             var res = A.merge(data, j); A.migrateEnquiries(data);
-            mergeSettingsLists(j.settings);
+            mergeSettingsLists(j.settings); relink4BHK(data.settings);
             save().then(function () { $('#rmsg').innerHTML = '<div class="ok">Merged: ' + res.added + ' added, ' + res.updated + ' updated, ' + res.skipped + ' already up to date.</div>'; });
           });
         };
@@ -2244,7 +2355,7 @@
             if (!confirm('Replace ALL data on this phone with this backup (' + j.bookings.length + ' bookings)? This cannot be undone.')) return;
             var keep = { pinHash: data.settings.pinHash, pinSalt: data.settings.pinSalt, syncToken: data.settings.syncToken, syncUrl: data.settings.syncUrl };
             data.settings = Object.assign(defaultSettings(), j.settings || {}, keep);
-            data.bookings = j.bookings || []; data.payments = j.payments || []; data.expenses = j.expenses || []; data.queries = j.queries || []; A.migrateEnquiries(data);
+            data.bookings = j.bookings || []; data.payments = j.payments || []; data.expenses = j.expenses || []; data.queries = j.queries || []; A.migrateEnquiries(data); relink4BHK(data.settings);
             save().then(function () { $('#rmsg').innerHTML = '<div class="ok">Restored ' + data.bookings.length + ' bookings.</div>'; });
           });
         };
@@ -2441,7 +2552,7 @@
       title: 'Your data', tab: 'more', back: '#/more', html: '<div class="card"><h3>Where your data is stored</h3>' +
         '<p>Everything you enter is saved <b>only on this phone</b>, inside this app’s private storage (IndexedDB). The website that delivers the app holds code only — never guest data.</p>' +
         '<p>It is protected by your phone’s own encryption and passcode. Optional PIN lock adds a second check when opening the app.</p>' +
-        '<p><b>Backups</b> (JSON) include settings, rooms, bookings, guests with their full ID, passport and visa details, payments and expenses. PIN and sync key are left out. ID photos are not in the backup file — they live on this phone and in your Google Drive booking folders.</p>' +
+        '<p><b>Backups</b> (password-encrypted file) include settings, rooms, bookings, guests with their full ID, passport and visa details, payments and expenses. PIN and sync key are left out. ID photos are not in the backup file — they live on this phone and in your Google Drive booking folders.</p>' +
         '<p><b>Cloud sync</b> (optional) copies the same records to a Google Sheet in <b>your own</b> Google account and keeps dated backup files in your Drive. The link to it is a private script address plus a secret key sent inside the request, not in the URL.</p>' +
         '<p><b>Important:</b> deleting the app from your Home Screen, or clearing Safari website data, can erase the phone copy. Keep backups or sync on.</p></div>'
     };
@@ -2500,6 +2611,7 @@
         if (!j.ok) throw new Error(j.error || 'Sync rejected');
         data.meta.lastSync = nowISO(); data.meta.lastSyncError = '';
         if (j.data) applyServer(j.data);
+        if (j.ext && Array.isArray(j.ext.blocks)) data.ext = j.ext;
         Object.keys(j.folders || {}).forEach(function (id) { var bk = booking(id); if (bk) bk.driveUrl = j.folders[id]; });
         return save(true).then(function () {
           /* records were replaced by the merged copy: redraw so buttons act on the fresh records (not while a form is open) */
