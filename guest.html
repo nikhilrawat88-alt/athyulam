@@ -108,8 +108,10 @@ ol.rules li::before{content:counter(r);flex:none;width:24px;height:24px;border-r
   render(cached ? withKeys(cached) : packed);
   if (packed && packed.id && LIVE.test(String(packed.u || ''))) {
     var done = false, timer = setTimeout(function () { if (!done) { done = true; state.failed = true; if (!cached && packed.t === 'menu' && !packed.c) render(packed); } }, 15000);
-    fetch(packed.u + '?page=guest&t=' + (packed.t === 'menu' ? 'menu' : 'info') + '&c=' + encodeURIComponent(packed.id), { redirect: 'follow' })
-      .then(function (r) { return r.json(); })
+    /* 2.0.5: same request style as the app's sync (POST, plain text body), which Google always accepts */
+    fetch(packed.u, { method: 'POST', redirect: 'follow', body: JSON.stringify({ action: 'guest', c: packed.id, t: packed.t === 'menu' ? 'menu' : 'info' }) })
+      .then(function (r) { return r.text(); })
+      .then(function (txt) { return JSON.parse(txt); })
       .then(function (j) {
         if (done && !(j && j.ok)) return; clearTimeout(timer); done = true;
         if (!j || !j.ok || !j.d) throw new Error('no data');
