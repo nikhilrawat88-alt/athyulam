@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var A = AH, inr = A.inr, num = A.num, r2 = A.r2;
-  var APP_VERSION = '2.0.5';
+  var APP_VERSION = '2.0.6';
 
   /* ---------- tiny helpers ---------- */
   function $(s, el) { return (el || document).querySelector(s); }
@@ -2614,8 +2614,9 @@
   function menuLink(g) {
     var cats = [], idx = {};
     menuList().forEach(function (m) { if (m.hidden) return; var c = m.cat || 'Menu'; if (idx[c] === undefined) { idx[c] = cats.length; cats.push([c, []]); } cats[idx[c]][1].push([m.name, num(m.price) || 0]); });
-    if (liveUrl()) return packLink(clean({ v: 1, t: 'menu', id: g.id, u: liveUrl(), n: g.name, ph: g.phone }));
-    return packLink(clean({ v: 1, t: 'menu', n: g.name, ph: g.phone, g: g.menuNote, c: cats }));
+    /* 2.0.6: the menu is always packed inside the QR, so it opens even when Google does not answer.
+       With Cloud sync set up, the page still asks the Sheet for the latest menu and swaps it in. */
+    return packLink(clean({ v: 1, t: 'menu', id: liveUrl() ? g.id : '', u: liveUrl(), n: g.name, ph: g.phone, g: g.menuNote, c: cats }));
   }
   function wifiText(g) {
     function e(x) { return String(x || '').replace(/([\;,:"])/g, '\\$1'); }
