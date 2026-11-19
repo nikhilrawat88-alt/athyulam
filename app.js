@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var A = AH, inr = A.inr, num = A.num, r2 = A.r2;
-  var APP_VERSION = '2.0.3';
+  var APP_VERSION = '2.0.4';
 
   /* ---------- tiny helpers ---------- */
   function $(s, el) { return (el || document).querySelector(s); }
@@ -2603,13 +2603,18 @@
     return new URL('guest.html', location.href.split('#')[0]).href + '#z=' + btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
   function clean(o) { Object.keys(o).forEach(function (k) { if (o[k] === '' || o[k] == null || (Array.isArray(o[k]) && !o[k].length)) delete o[k]; }); return o; }
+  /* 2.0.4: with Cloud sync set up, links also carry the card id and your Sheet's web-app address, so the guest page
+     fetches the latest details. The welcome QR keeps its details inside as a back-up; the menu QR carries only the
+     link (much smaller code) and reads the menu from the Sheet. */
+  function liveUrl() { var u = String(S().syncUrl || '').trim(); return /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(u) ? u : ''; }
   function infoLink(g) {
-    return packLink(clean({ v: 1, n: g.name, w: g.welcome, ws: g.wifiName, wp: g.wifiPass, ci: g.checkIn, co: g.checkOut, b: g.breakfast, ph: g.phone,
+    return packLink(clean({ v: 1, id: liveUrl() ? g.id : '', u: liveUrl(), n: g.name, w: g.welcome, ws: g.wifiName, wp: g.wifiPass, ci: g.checkIn, co: g.checkOut, b: g.breakfast, ph: g.phone,
       r: String(g.rules || '').split('\n').map(function (x) { return x.replace(/^\s*[-•*\d.)]+\s*/, '').trim(); }).filter(Boolean), x: g.note, m: g.map, rv: g.review }));
   }
   function menuLink(g) {
     var cats = [], idx = {};
     menuList().forEach(function (m) { if (m.hidden) return; var c = m.cat || 'Menu'; if (idx[c] === undefined) { idx[c] = cats.length; cats.push([c, []]); } cats[idx[c]][1].push([m.name, num(m.price) || 0]); });
+    if (liveUrl()) return packLink(clean({ v: 1, t: 'menu', id: g.id, u: liveUrl(), n: g.name, ph: g.phone }));
     return packLink(clean({ v: 1, t: 'menu', n: g.name, ph: g.phone, g: g.menuNote, c: cats }));
   }
   function wifiText(g) {
@@ -2635,7 +2640,10 @@
     var list = guestPages(), g = list.filter(function (x) { return x.id === arg; })[0] || list[0];
     function inp(k, label, hint, extra) { return field(label, '<input name="' + k + '" value="' + esc(g[k] || '') + '"' + (extra || '') + '>', '', hint); }
     var html = (list.length > 1 || true ? '<div class="chips wrap">' + list.map(function (x) { return '<a class="chip' + (x.id === g.id ? ' on' : '') + '" href="#/guestqr/' + x.id + '">' + esc(x.label) + '</a>'; }).join('') + '<button type="button" class="chip" id="gpadd">' + icon('plus') + 'Add property</button></div>' : '') +
-      '<div class="card"><h3>' + icon('info') + 'What guests see</h3><p class="small">Guests scan the QR in the room and get a page with these details. Everything is inside the QR itself: no guest data, works on any phone. <b>Print the QR again after you change anything here.</b></p>' +
+      '<div class="card"><h3>' + icon('info') + 'What guests see</h3>' +
+      (liveUrl() ? '<div class="ok">' + icon('check') + '<b>Live updates on.</b> Change anything here, save, and tap Sync now: guests see it on the next scan. No reprint needed. If the Sheet is slow or down, the welcome page shows the details printed in its QR.</div>'
+        : '<div class="warn">Cloud sync is not set up, so the details are printed inside the QR. <b>Print again after any change.</b> Set up sync (More → Settings) for live updates.</div>') +
+      '<p class="small">No guest data is ever on these pages.</p>' +
       '<form id="gqf" novalidate>' +
       '<div class="two">' + inp('label', 'Card name (only for you)', '', ' placeholder="e.g. Ranipokhri"') + inp('name', 'Property name shown to guests') + '</div>' +
       inp('welcome', 'Welcome line') +
@@ -2660,7 +2668,7 @@
           ['label', 'name', 'welcome', 'wifiName', 'wifiPass', 'checkIn', 'checkOut', 'breakfast', 'phone', 'rules', 'note', 'map', 'review', 'menuNote'].forEach(function (k) { g[k] = String(f.elements[k].value || '').trim(); });
           ['map', 'review'].forEach(function (k) { if (g[k] && !/^https:\/\//i.test(g[k])) { toast((k === 'map' ? 'Maps' : 'Review') + ' link must start with https:// — left out.', true); g[k] = ''; } });
           g.menu = f.elements.menu.checked; g.label = g.label || g.name || 'Property';
-          save(); haptic(); toast('Saved. Print the new QR codes.'); render();
+          save(); haptic(); toast(liveUrl() ? 'Saved. Guests see it after the next sync.' : 'Saved. Print the new QR codes.'); render();
         };
         $('#gpadd').onclick = function () { var n = newGuestPage('Property ' + (list.length + 1)); list.push(n); save(); go('#/guestqr/' + n.id); };
         var del = $('#gpdel'); if (del) del.onclick = function () { if (!confirm('Remove the card "' + g.label + '"? Printed QR codes keep working.')) return; S().guestPages = list.filter(function (x) { return x.id !== g.id; }); save(); go('#/guestqr'); };

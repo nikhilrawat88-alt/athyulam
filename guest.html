@@ -95,59 +95,85 @@ ol.rules li::before{content:counter(r);flex:none;width:24px;height:24px;border-r
     });
   }
   window.addEventListener('hashchange', function () { location.reload(); });
-  var d; try { d = decode(); } catch (e) { d = null; }
-  var app = document.getElementById('app');
-  if (!d) { app.innerHTML = '<div class="empty"><div class="mono" style="margin-bottom:16px">A</div>Please scan the QR code in your room to see the Wi-Fi, house information and menu.</div>'; return; }
-  document.title = (d.t === 'menu' ? 'Menu · ' : 'Welcome · ') + (d.n || '');
-  d.m = safeUrl(d.m); d.rv = safeUrl(d.rv);
-  var wa = digits(d.ph), html = '<div class="hero"><div class="mono">' + esc(String(d.n || 'A').trim().charAt(0)) + '</div><small>' + (d.t === 'menu' ? 'Food menu' : 'Welcome to') + '</small><h1>' + esc(d.n) + '</h1>' + (d.w ? '<p>' + esc(d.w) + '</p>' : '') + '</div><main>';
+  /* Version 2.0.4: details packed in the QR show at once; if the QR also names a card and your Google Sheet link,
+     the latest details are fetched from the Sheet and replace them (no reprint needed). The last good copy is kept
+     on the guest's phone for the next visit. */
+  var packed; try { packed = decode(); } catch (e) { packed = null; }
+  var state = { failed: false };
+  var LIVE = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/;
+  var cacheKey = packed && packed.id ? 'ahGuest:' + packed.id + ':' + (packed.t === 'menu' ? 'menu' : 'info') : '';
+  function fromCache() { try { var c = cacheKey && localStorage.getItem(cacheKey); return c ? JSON.parse(c) : null; } catch (e) { return null; } }
+  function withKeys(x) { x.id = packed.id; x.u = packed.u; x.t = packed.t === 'menu' ? 'menu' : x.t; return x; }
+  var cached = fromCache();
+  render(cached ? withKeys(cached) : packed);
+  if (packed && packed.id && LIVE.test(String(packed.u || ''))) {
+    var done = false, timer = setTimeout(function () { if (!done) { done = true; state.failed = true; if (!cached && packed.t === 'menu' && !packed.c) render(packed); } }, 15000);
+    fetch(packed.u + '?page=guest&t=' + (packed.t === 'menu' ? 'menu' : 'info') + '&c=' + encodeURIComponent(packed.id), { redirect: 'follow' })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (done && !(j && j.ok)) return; clearTimeout(timer); done = true;
+        if (!j || !j.ok || !j.d) throw new Error('no data');
+        try { localStorage.setItem(cacheKey, JSON.stringify(j.d)); } catch (e) { /* private mode */ }
+        if (JSON.stringify(j.d) !== JSON.stringify(cached)) render(withKeys(j.d));
+      })
+      .catch(function () { clearTimeout(timer); done = true; state.failed = true; if (!cached && packed.t === 'menu' && !packed.c) render(packed); });
+  }
+  function render(d) {
+    var app = document.getElementById('app');
+    if (!d) { app.innerHTML = '<div class="empty"><div class="mono" style="margin-bottom:16px">A</div>Please scan the QR code in your room to see the Wi-Fi, house information and menu.</div>'; return; }
+    if (d.t === 'menu' && !d.c) { app.innerHTML = '<div class="hero"><div class="mono">' + esc(String(d.n || 'A').trim().charAt(0)) + '</div><small>Food menu</small><h1>' + esc(d.n) + '</h1></div><main><div class="card" style="text-align:center">' +
+      (state.failed ? 'The menu could not load right now.' + (digits(d.ph) ? '<div class="btns" style="margin-top:14px"><a class="btn" href="tel:+' + digits(d.ph) + '">' + ic('phone') + 'Call</a><a class="btn wa" href="https://wa.me/' + digits(d.ph) + '">' + ic('wa') + 'WhatsApp</a></div>' : '') : 'Loading the menu…') + '</div></main>'; return; }
+    document.title = (d.t === 'menu' ? 'Menu · ' : 'Welcome · ') + (d.n || '');
+    d.m = safeUrl(d.m); d.rv = safeUrl(d.rv);
+    var wa = digits(d.ph), html = '<div class="hero"><div class="mono">' + esc(String(d.n || 'A').trim().charAt(0)) + '</div><small>' + (d.t === 'menu' ? 'Food menu' : 'Welcome to') + '</small><h1>' + esc(d.n) + '</h1>' + (d.w ? '<p>' + esc(d.w) + '</p>' : '') + '</div><main>';
 
-  if (d.t === 'menu') {
-    var cart = {};
-    html += '<div class="card"><h2>' + ic('food') + 'Menu</h2><p style="margin:0;color:var(--muted);font-size:14px">Tap + to choose, then send your order on WhatsApp. Prices in rupees' + (d.g ? '; ' + esc(d.g) : '') + '.</p>' +
-      (d.c || []).map(function (cat, ci) {
-        return '<div class="cat">' + esc(cat[0]) + '</div>' + (cat[1] || []).map(function (it, ii) {
-          return '<div class="item"><div class="nm">' + esc(it[0]) + '</div><div class="pr">' + (it[1] ? inr(it[1]) : '') + '</div>' + (wa ? '<div class="qty" data-k="' + ci + '_' + ii + '"><button type="button" data-d="-1" aria-label="Less">−</button><b>0</b><button type="button" data-d="1" aria-label="More">+</button></div>' : '') + '</div>';
-        }).join('');
-      }).join('') + '</div>';
-    if (wa) html += '<div class="order hide" id="order"><div><b id="otot"></b><small id="ocnt"></small></div><input id="oroom" placeholder="Room" aria-label="Your room"><button class="btn wa" id="osend" style="min-height:42px;padding:0 14px">' + ic('wa') + 'Order</button></div>';
-    html += '<p class="foot">' + esc(d.n) + (d.ph ? ' · ' + esc(d.ph) : '') + '</p></main>';
-    app.innerHTML = html;
-    function item(k) { var p = k.split('_'); return d.c[+p[0]][1][+p[1]]; }
-    function draw() {
-      var keys = Object.keys(cart).filter(function (k) { return cart[k] > 0; }), tot = 0, n = 0;
-      keys.forEach(function (k) { tot += cart[k] * (item(k)[1] || 0); n += cart[k]; });
-      var o = document.getElementById('order'); if (!o) return;
-      o.classList.toggle('hide', !n); document.getElementById('otot').textContent = inr(tot); document.getElementById('ocnt').textContent = n + ' item' + (n === 1 ? '' : 's');
-    }
-    Array.prototype.forEach.call(document.querySelectorAll('.qty'), function (q) {
-      Array.prototype.forEach.call(q.querySelectorAll('button'), function (b) {
-        b.onclick = function () { var k = q.dataset.k; cart[k] = Math.max(0, (cart[k] || 0) + Number(b.dataset.d)); q.querySelector('b').textContent = cart[k]; draw(); };
+    if (d.t === 'menu') {
+      var cart = {};
+      html += '<div class="card"><h2>' + ic('food') + 'Menu</h2><p style="margin:0;color:var(--muted);font-size:14px">Tap + to choose, then send your order on WhatsApp. Prices in rupees' + (d.g ? '; ' + esc(d.g) : '') + '.</p>' +
+        (d.c || []).map(function (cat, ci) {
+          return '<div class="cat">' + esc(cat[0]) + '</div>' + (cat[1] || []).map(function (it, ii) {
+            return '<div class="item"><div class="nm">' + esc(it[0]) + '</div><div class="pr">' + (it[1] ? inr(it[1]) : '') + '</div>' + (wa ? '<div class="qty" data-k="' + ci + '_' + ii + '"><button type="button" data-d="-1" aria-label="Less">−</button><b>0</b><button type="button" data-d="1" aria-label="More">+</button></div>' : '') + '</div>';
+          }).join('');
+        }).join('') + '</div>';
+      if (wa) html += '<div class="order hide" id="order"><div><b id="otot"></b><small id="ocnt"></small></div><input id="oroom" placeholder="Room" aria-label="Your room"><button class="btn wa" id="osend" style="min-height:42px;padding:0 14px">' + ic('wa') + 'Order</button></div>';
+      html += '<p class="foot">' + esc(d.n) + (d.ph ? ' · ' + esc(d.ph) : '') + '</p></main>';
+      app.innerHTML = html;
+      function item(k) { var p = k.split('_'); return d.c[+p[0]][1][+p[1]]; }
+      function draw() {
+        var keys = Object.keys(cart).filter(function (k) { return cart[k] > 0; }), tot = 0, n = 0;
+        keys.forEach(function (k) { tot += cart[k] * (item(k)[1] || 0); n += cart[k]; });
+        var o = document.getElementById('order'); if (!o) return;
+        o.classList.toggle('hide', !n); document.getElementById('otot').textContent = inr(tot); document.getElementById('ocnt').textContent = n + ' item' + (n === 1 ? '' : 's');
+      }
+      Array.prototype.forEach.call(document.querySelectorAll('.qty'), function (q) {
+        Array.prototype.forEach.call(q.querySelectorAll('button'), function (b) {
+          b.onclick = function () { var k = q.dataset.k; cart[k] = Math.max(0, (cart[k] || 0) + Number(b.dataset.d)); q.querySelector('b').textContent = cart[k]; draw(); };
+        });
       });
-    });
-    var os = document.getElementById('osend');
-    if (os) os.onclick = function () {
-      var room = document.getElementById('oroom').value.trim(), lines = [], tot = 0;
-      Object.keys(cart).forEach(function (k) { if (cart[k] > 0) { var it = item(k), v = cart[k] * (it[1] || 0); tot += v; lines.push(cart[k] + ' × ' + it[0] + (it[1] ? ' (' + inr(v) + ')' : '')); } });
-      var text = 'Namaste, food order' + (room ? ' for room ' + room : '') + ':\n' + lines.join('\n') + '\nTotal ' + inr(tot);
-      location.href = 'https://wa.me/' + wa + '?text=' + encodeURIComponent(text);
-    };
-    return;
-  }
+      var os = document.getElementById('osend');
+      if (os) os.onclick = function () {
+        var room = document.getElementById('oroom').value.trim(), lines = [], tot = 0;
+        Object.keys(cart).forEach(function (k) { if (cart[k] > 0) { var it = item(k), v = cart[k] * (it[1] || 0); tot += v; lines.push(cart[k] + ' × ' + it[0] + (it[1] ? ' (' + inr(v) + ')' : '')); } });
+        var text = 'Namaste, food order' + (room ? ' for room ' + room : '') + ':\n' + lines.join('\n') + '\nTotal ' + inr(tot);
+        location.href = 'https://wa.me/' + wa + '?text=' + encodeURIComponent(text);
+      };
+      return;
+    }
 
-  if (d.ws) {
-    html += '<div class="card"><h2>' + ic('wifi') + 'Wi-Fi</h2><div class="kv"><span>Network</span><b>' + esc(d.ws) + '</b></div>' +
-      (d.wp ? '<div style="color:var(--muted);font-size:13px;margin-top:8px">Password</div><div class="wifi-pass">' + esc(d.wp) + '</div><div class="btns"><button class="btn primary full" id="cpw">' + ic('copy') + 'Copy password</button></div>' : '<div class="kv"><span>Password</span><b>None</b></div>') + '</div>';
+    if (d.ws) {
+      html += '<div class="card"><h2>' + ic('wifi') + 'Wi-Fi</h2><div class="kv"><span>Network</span><b>' + esc(d.ws) + '</b></div>' +
+        (d.wp ? '<div style="color:var(--muted);font-size:13px;margin-top:8px">Password</div><div class="wifi-pass">' + esc(d.wp) + '</div><div class="btns"><button class="btn primary full" id="cpw">' + ic('copy') + 'Copy password</button></div>' : '<div class="kv"><span>Password</span><b>None</b></div>') + '</div>';
+    }
+    if (d.ci || d.co) html += '<div class="card"><h2>' + ic('clock') + 'Timings</h2><div class="times">' + (d.ci ? '<div class="time"><small>Check-in</small><b>' + esc(d.ci) + '</b></div>' : '') + (d.co ? '<div class="time"><small>Check-out</small><b>' + esc(d.co) + '</b></div>' : '') + '</div>' +
+      (d.b ? '<div class="kv" style="margin-top:10px;border-top:1px solid var(--line)"><span>Breakfast</span><b>' + esc(d.b) + '</b></div>' : '') + '</div>';
+    if (wa) html += '<div class="card"><h2>' + ic('phone') + 'Need anything?</h2><p style="margin:0 0 12px;color:var(--muted);font-size:14.5px">We are a call or message away, any time.</p><div class="btns"><a class="btn" href="tel:+' + wa + '">' + ic('phone') + 'Call</a><a class="btn wa" href="https://wa.me/' + wa + '">' + ic('wa') + 'WhatsApp</a></div></div>';
+    if (d.r && d.r.length) html += '<div class="card"><h2>' + ic('list') + 'House rules</h2><ol class="rules">' + d.r.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ol></div>';
+    if (d.x) html += '<div class="card"><h2>' + ic('info') + 'Good to know</h2><div class="note">' + esc(d.x) + '</div></div>';
+    if (d.m || d.rv) html += '<div class="card btns">' + (d.m ? '<a class="btn' + (d.rv ? '' : ' full') + '" href="' + esc(d.m) + '" target="_blank" rel="noopener">' + ic('pin') + 'Location</a>' : '') + (d.rv ? '<a class="btn primary' + (d.m ? '' : ' full') + '" href="' + esc(d.rv) + '" target="_blank" rel="noopener">' + ic('star') + 'Review us</a>' : '') + '</div>';
+    html += '<p class="foot">' + esc(d.n) + (d.ph ? ' · ' + esc(d.ph) : '') + '<br>Thank you for staying with us.</p></main>';
+    app.innerHTML = html;
+    var cp = document.getElementById('cpw'); if (cp) cp.onclick = function () { copy(d.wp, 'Password copied'); };
   }
-  if (d.ci || d.co) html += '<div class="card"><h2>' + ic('clock') + 'Timings</h2><div class="times">' + (d.ci ? '<div class="time"><small>Check-in</small><b>' + esc(d.ci) + '</b></div>' : '') + (d.co ? '<div class="time"><small>Check-out</small><b>' + esc(d.co) + '</b></div>' : '') + '</div>' +
-    (d.b ? '<div class="kv" style="margin-top:10px;border-top:1px solid var(--line)"><span>Breakfast</span><b>' + esc(d.b) + '</b></div>' : '') + '</div>';
-  if (wa) html += '<div class="card"><h2>' + ic('phone') + 'Need anything?</h2><p style="margin:0 0 12px;color:var(--muted);font-size:14.5px">We are a call or message away, any time.</p><div class="btns"><a class="btn" href="tel:+' + wa + '">' + ic('phone') + 'Call</a><a class="btn wa" href="https://wa.me/' + wa + '">' + ic('wa') + 'WhatsApp</a></div></div>';
-  if (d.r && d.r.length) html += '<div class="card"><h2>' + ic('list') + 'House rules</h2><ol class="rules">' + d.r.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ol></div>';
-  if (d.x) html += '<div class="card"><h2>' + ic('info') + 'Good to know</h2><div class="note">' + esc(d.x) + '</div></div>';
-  if (d.m || d.rv) html += '<div class="card btns">' + (d.m ? '<a class="btn' + (d.rv ? '' : ' full') + '" href="' + esc(d.m) + '" target="_blank" rel="noopener">' + ic('pin') + 'Location</a>' : '') + (d.rv ? '<a class="btn primary' + (d.m ? '' : ' full') + '" href="' + esc(d.rv) + '" target="_blank" rel="noopener">' + ic('star') + 'Review us</a>' : '') + '</div>';
-  html += '<p class="foot">' + esc(d.n) + (d.ph ? ' · ' + esc(d.ph) : '') + '<br>Thank you for staying with us.</p></main>';
-  app.innerHTML = html;
-  var cp = document.getElementById('cpw'); if (cp) cp.onclick = function () { copy(d.wp, 'Password copied'); };
 })();
 </script>
 </body>
