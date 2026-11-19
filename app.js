@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var A = AH, inr = A.inr, num = A.num, r2 = A.r2;
-  var APP_VERSION = '2.0.1';
+  var APP_VERSION = '2.0.2';
 
   /* ---------- tiny helpers ---------- */
   function $(s, el) { return (el || document).querySelector(s); }
@@ -137,7 +137,7 @@
       syncUrl: '', syncToken: '', autoSync: true,
       mealRates: { Breakfast: 0, Lunch: 0, Dinner: 0 }, menu: JSON.parse(JSON.stringify(A.MENU_DEFAULT)),
       services: [{ name: 'Bonfire', rate: 0 }, { name: 'Pick-up / drop', rate: 0 }, { name: 'Sightseeing', rate: 0 }],
-      tokenAmount: 500, upiId: '', autoReviewEmail: false, customFields: [], couponPrefix: 'ATH', bookingPrefix: 'ATH', keepPhotosDays: 30, uploadDocs: true, premiumStays: 3, premiumSpend: 25000,
+      tokenAmount: 500, upiId: '', autoReviewEmail: false, customFields: [], couponPrefix: 'ATH', bookingPrefix: 'ATH', keepPhotosDays: 30, uploadDocs: true, repeatStays: 3, premiumOne: 10000, premiumThree: 15000,
       reviewLinks: {
         google: 'https://share.google/sGf4Yhq7SHDDbqd9y',
         'Booking.com': 'https://www.booking.com/hotel/in/athulyam-homes.html',
@@ -311,32 +311,46 @@
     });
   }
 
-  /* ---------- Version 2.0: repeat guests ----------
-     Past stays are found by mobile number (last 10 digits). "Premium" = at least N stays or ₹X billed in total
-     (Settings → Guest IDs & documents; starting values 3 stays / ₹25,000 are a proposal, change them to suit). */
+  /* ---------- Version 2.0.2: repeat and premium guests (two separate tags) ----------
+     Guests are matched by mobile number (last 10 digits). A "stay" = a booking that is not cancelled and has started.
+     Repeat  = at least N stays (owner: more than 2, so 3).
+     Premium = paid at least ₹X in one stay (owner: 10,000) OR at least ₹Y over the latest 3 stays (owner: 15,000).
+     "Paid" = payments received minus refunds. The booking being looked at counts too. All three numbers are in Settings. */
   function last10(p) { var d = String(p || '').replace(/\D/g, ''); return d.length >= 10 ? d.slice(-10) : ''; }
+  function isStay(b) { return !A.isCancelled(b) && b.status !== 'Enquiry' && (b.status === 'Checked Out' || b.status === 'Checked In' || (A.isDate(b.checkIn) && b.checkIn <= today())); }
+  function guestTags(phone) {
+    var key = last10(phone); if (!key) return { repeat: false, premium: false, stays: 0 };
+    var st = S(), stays = data.bookings.filter(function (b) { return isStay(b) && last10(b.phone) === key; })
+      .sort(function (a, b) { return String(a.checkIn) < String(b.checkIn) ? 1 : -1; });
+    var paid = stays.map(function (b) { return Math.max(0, calc(b).received); });
+    var best = paid.length ? Math.max.apply(null, paid) : 0, last3 = r2(A.sum(paid.slice(0, 3), function (v) { return v; }));
+    return { stays: stays.length, best: best, last3: last3,
+      repeat: stays.length >= num(st.repeatStays || 3),
+      premium: best >= num(st.premiumOne || 10000) || last3 >= num(st.premiumThree || 15000) };
+  }
   function guestHistory(phone, excludeId) {
     var key = last10(phone); if (!key) return null;
     var list = data.bookings.filter(function (b) { return b.id !== excludeId && b.status !== 'Enquiry' && last10(b.phone) === key; });
     if (!list.length) return null;
-    var kept = list.filter(function (b) { return !A.isCancelled(b); }), st = S();
+    var kept = list.filter(function (b) { return !A.isCancelled(b); });
     var total = 0, paid = 0, pending = 0;
     kept.forEach(function (b) { var c = calc(b); total = r2(total + c.total); paid = r2(paid + c.received); if (c.outstanding > 0) pending = r2(pending + c.outstanding); });
     var ids = list.map(function (b) { return b.id; });
     var pays = (data.payments || []).filter(function (p) { return ids.indexOf(p.bookingId) >= 0 && p.type !== 'refund'; }).sort(function (a, b) { return a.date < b.date ? 1 : -1; });
-    var stays = kept.filter(function (b) { return b.status === 'Checked Out' || b.status === 'Checked In' || (A.isDate(b.checkIn) && b.checkIn <= today()); }).length;
     var last = kept.slice().sort(function (a, b) { return String(a.checkIn) < String(b.checkIn) ? 1 : -1; })[0] || list[0];
-    return { list: list, stays: stays, bookings: kept.length, cancelled: list.length - kept.length, total: total, paid: paid, pending: pending, lastPay: pays[0] || null, last: last,
-      premium: stays >= num(st.premiumStays || 3) || total >= num(st.premiumSpend || 25000) };
+    var tg = guestTags(phone);
+    return { list: list, stays: kept.filter(isStay).length, cancelled: list.length - kept.length, total: total, paid: paid, pending: pending, lastPay: pays[0] || null, last: last,
+      repeat: tg.repeat, premium: tg.premium, tags: tg };
   }
-  function repeatTag(b) {
-    var h = guestHistory(b.phone, b.id); if (!h) return '';
-    return h.premium ? ' <span class="tag-prem">' + icon('star') + 'Premium</span>' : ' <span class="tag-rep">Returning</span>';
+  function tagsHtml(t) {
+    return (t.premium ? ' <span class="tag-prem">' + icon('star') + 'Premium</span>' : '') + (t.repeat ? ' <span class="tag-rep">' + icon('user') + 'Repeat</span>' : '');
   }
+  function repeatTag(b) { return tagsHtml(guestTags(b.phone)); }
   function historyCard(h, withFill) {
     if (!h) return '';
-    return '<div class="card repeat' + (h.premium ? ' premium' : '') + '"><div class="rp-h">' + icon(h.premium ? 'star' : 'user') + '<b>' + (h.premium ? 'Premium guest' : 'Returning guest') + '</b>' +
-      '<span class="pill">' + h.stays + ' stay' + (h.stays === 1 ? '' : 's') + '</span></div>' +
+    var title = h.premium && h.repeat ? 'Premium repeat guest' : h.premium ? 'Premium guest' : h.repeat ? 'Repeat guest' : 'Has stayed before';
+    return '<div class="card repeat' + (h.premium ? ' premium' : '') + '"><div class="rp-h">' + icon(h.premium ? 'star' : 'user') + '<b>' + title + '</b>' +
+      '<span class="pill">' + h.stays + ' earlier stay' + (h.stays === 1 ? '' : 's') + '</span></div>' +
       '<div class="rp-grid"><div><small>Total billed</small><b>' + inr(h.total) + '</b></div><div><small>Paid</small><b>' + inr(h.paid) + '</b></div><div><small>Pending</small><b class="' + (h.pending > 0 ? 'due' : '') + '">' + inr(h.pending) + '</b></div></div>' +
       '<p class="small">Latest booking: <a href="#/guest/' + h.last.id + '">' + esc(gname(h.last)) + ' · ' + fmtShort(h.last.checkIn) + ' → ' + fmtShort(h.last.checkOut) + '</a>' +
       (h.lastPay ? ' · Last payment ' + inr(h.lastPay.amount) + ' (' + esc(h.lastPay.method) + ', ' + fmtShort(h.lastPay.date) + ')' : ' · No payments recorded') + (h.cancelled ? ' · ' + h.cancelled + ' cancelled' : '') + '</p>' +
@@ -1089,7 +1103,7 @@
     if (b.status === 'Checked In') actions += '<button class="btn primary" data-st="Checked Out">Check out</button>';
     var msgs = whatsappTemplates(b, c);
     var hist = guestHistory(b.phone, b.id);
-    var html = '<div class="card hero"><div class="bk-top"><b class="name">' + esc(gname(b)) + (hist && hist.premium ? ' <span class="tag-prem">' + icon('star') + 'Premium</span>' : '') + '</b><span class="st ' + statusClass(b.status) + '">' + esc(b.status) + '</span></div>' +
+    var html = '<div class="card hero"><div class="bk-top"><b class="name">' + esc(gname(b)) + repeatTag(b) + '</b><span class="st ' + statusClass(b.status) + '">' + esc(b.status) + '</span></div>' +
       '<div class="bk-mid">' + esc(roomsLabel(b)) + ' · ' + (A.isDate(b.checkIn) ? fmtDate(b.checkIn) + ' → ' + fmtDate(b.checkOut) + (A.stayLabel(b) ? ' · ' + A.stayLabel(b) : '') : 'Dates not set') + '</div>' +
       '<div class="bk-mid">' + esc(b.no ? b.no + ' · ' : '') + esc(b.source) + ' · ' + b.adults + ' adult' + (b.adults == 1 ? '' : 's') + (num(b.children) ? ', ' + b.children + ' child' + (b.children == 1 ? '' : 'ren') : '') + '</div>' +
       (b.phone ? '<div class="bk-mid"><a href="tel:' + esc(b.phone) + '">' + icon('phone') + ' ' + esc(b.phone) + '</a></div>' : '') +
@@ -2826,7 +2840,10 @@
       '<label class="chk"><input type="radio" name="idMode" value="last4"' + (s.idMode !== 'full' ? ' checked' : '') + '> Last 4 characters only</label>' +
       '<label class="chk"><input type="checkbox" name="uploadDocs"' + (s.uploadDocs !== false ? ' checked' : '') + '> Copy ID photos and documents to Google Drive at each sync</label>' +
       field('Keep photos on this phone after check-out (days)', '<input name="keepPhotosDays" type="number" min="1" value="' + esc(s.keepPhotosDays || 30) + '">', '', 'Only removed from the phone once they are safely in Drive.') +
-      '<div class="two">' + field('Premium guest: stays', '<input name="premiumStays" type="number" min="1" value="' + esc(s.premiumStays || 3) + '">') + field('or total billed (₹)', '<input name="premiumSpend" type="number" min="0" value="' + esc(s.premiumSpend || 25000) + '">', '', 'Returning guests (same mobile) are tagged Premium at either level.') + '</div>' +
+      '<div class="three">' + field('Repeat tag: stays', '<input name="repeatStays" type="number" min="2" value="' + esc(s.repeatStays || 3) + '">', '', 'Stays needed.') +
+      field('Premium: paid in one stay (₹)', '<input name="premiumOne" type="number" min="0" value="' + esc(s.premiumOne || 10000) + '">') +
+      field('or paid over last 3 stays (₹)', '<input name="premiumThree" type="number" min="0" value="' + esc(s.premiumThree || 15000) + '">') + '</div>' +
+      '<p class="small">Guests are matched by mobile number. Repeat and Premium are separate tags; a guest can have both.</p>' +
       field('Booking number prefix', '<input name="bookingPrefix" value="' + esc(s.bookingPrefix || 'ATH') + '" maxlength="6" autocapitalize="characters">', '', 'Booking numbers look like ATH-000256 and keep counting up (they never restart). Changing it affects new bookings only.') +
       '<p class="small">ID numbers, photos, passports and visas are personal data. They are kept on this phone (protected by your phone lock and the app PIN) and in your own Google Drive. Share the Drive folder with nobody else.</p></div>' +
       '<div class="card"><h3>Backups</h3>' + field('Warn me if no backup or sync for (days)', '<input name="backupDays" type="number" min="1" value="' + s.backupDays + '">') + '</div>' +
@@ -2891,7 +2908,7 @@
           $$('[data-rl]', f).forEach(function (el) { s.reviewLinks[el.dataset.rl] = el.value.trim(); });
           var badLink = Object.keys(s.reviewLinks).filter(function (k) { return s.reviewLinks[k] && !/^https:\/\//.test(s.reviewLinks[k]); });
           if (badLink.length) return toast('Links must start with https:// (' + badLink.join(', ') + ')', true);
-          s.idMode = f.elements.idMode.value; s.uploadDocs = f.elements.uploadDocs.checked; s.keepPhotosDays = Math.max(1, num(f.elements.keepPhotosDays.value) || 30); s.premiumStays = Math.max(1, Math.round(num(f.elements.premiumStays.value)) || 3); s.premiumSpend = Math.max(0, num(f.elements.premiumSpend.value));
+          s.idMode = f.elements.idMode.value; s.uploadDocs = f.elements.uploadDocs.checked; s.keepPhotosDays = Math.max(1, num(f.elements.keepPhotosDays.value) || 30); s.repeatStays = Math.max(2, Math.round(num(f.elements.repeatStays.value)) || 3); s.premiumOne = Math.max(0, num(f.elements.premiumOne.value)); s.premiumThree = Math.max(0, num(f.elements.premiumThree.value));
           s.bookingPrefix = (f.elements.bookingPrefix.value || 'ATH').toUpperCase().replace(/[^A-Z0-9]/g, '') || 'ATH';
           if (s.seasons.some(function (se) { return se.from && se.to && se.from > se.to; })) return toast('A season ends before it starts.', true);
           save().then(function () { toast('Settings saved'); render(); });
