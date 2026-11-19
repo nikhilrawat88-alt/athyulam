@@ -20,6 +20,7 @@ html,body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 var(--san
 .hero{background:radial-gradient(120% 90% at 50% 0%,#2a5641 0%,var(--green) 60%);color:#fff;text-align:center;padding:calc(env(safe-area-inset-top) + 34px) 22px 46px;position:relative}
 .hero::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;background:linear-gradient(90deg,transparent,var(--gold) 20%,var(--gold2) 50%,var(--gold) 80%,transparent)}
 .mono{width:62px;height:62px;border-radius:50%;margin:0 auto 14px;display:flex;align-items:center;justify-content:center;background:linear-gradient(145deg,var(--gold2),var(--gold));color:var(--green);font:600 30px var(--serif);box-shadow:0 0 0 4px rgba(255,255,255,.08)}
+.mono img{width:100%;height:100%;border-radius:50%;object-fit:cover;background:#fdf7e1}
 .back{position:absolute;left:14px;top:calc(env(safe-area-inset-top) + 12px);display:flex;align-items:center;gap:4px;padding:8px 14px 8px 10px;border-radius:999px;background:rgba(255,255,255,.12);color:#fff;font:600 14px var(--sans);text-decoration:none;border:0;cursor:pointer;z-index:2}.back svg{width:18px;height:18px}
 .hero small{display:block;letter-spacing:.22em;text-transform:uppercase;font-size:11.5px;color:rgba(255,255,255,.65);font-weight:600}
 .hero h1{margin:6px 0 8px;font:600 30px/1.15 var(--serif)}
@@ -136,11 +137,11 @@ ol.rules li::before{content:counter(r);flex:none;width:24px;height:24px;border-r
   function render(d) {
     var app = document.getElementById('app');
     if (!d) { app.innerHTML = '<div class="empty"><div class="mono" style="margin-bottom:16px">A</div>Please scan the QR code in your room to see the Wi-Fi, house information and menu.</div>'; return; }
-    if (d.t === 'menu' && !d.c) { app.innerHTML = '<div class="hero">' + backBtn() + '<div class="mono">' + esc(String(d.n || 'A').trim().charAt(0)) + '</div><small>Food menu</small><h1>' + esc(d.n) + '</h1></div><main><div class="card" style="text-align:center">' +
+    if (d.t === 'menu' && !d.c) { app.innerHTML = '<div class="hero">' + backBtn() + '<div class="mono"><img src="icons/icon-192.png" alt=""></div><small>Food menu</small><h1>' + esc(d.n) + '</h1></div><main><div class="card" style="text-align:center">' +
       (state.failed ? 'The menu could not load right now.' + (digits(d.ph) ? '<div class="btns" style="margin-top:14px"><a class="btn" href="tel:+' + digits(d.ph) + '">' + ic('phone') + 'Call</a><a class="btn wa" href="https://wa.me/' + digits(d.ph) + '">' + ic('wa') + 'WhatsApp</a></div>' : '') : 'Loading the menu…') + '</div></main>'; return; }
     document.title = (d.t === 'menu' ? 'Menu · ' : 'Welcome · ') + (d.n || '');
     d.m = safeUrl(d.m); d.rv = safeUrl(d.rv);
-    var wa = digits(d.ph), html = '<div class="hero">' + backBtn() + '<div class="mono">' + esc(String(d.n || 'A').trim().charAt(0)) + '</div><small>' + (d.t === 'menu' ? 'Food menu' : 'Welcome to') + '</small><h1>' + esc(d.n) + '</h1>' + (d.w ? '<p>' + esc(d.w) + '</p>' : '') + '</div><main>';
+    var wa = digits(d.ph), html = '<div class="hero">' + backBtn() + '<div class="mono"><img src="icons/icon-192.png" alt=""></div><small>' + (d.t === 'menu' ? 'Food menu' : 'Welcome to') + '</small><h1>' + esc(d.n) + '</h1>' + (d.w ? '<p>' + esc(d.w) + '</p>' : '') + '</div><main>';
 
     if (d.t === 'menu') {
       var cart = {};

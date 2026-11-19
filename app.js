@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var A = AH, inr = A.inr, num = A.num, r2 = A.r2;
-  var APP_VERSION = '2.0.6';
+  var APP_VERSION = '2.0.7';
 
   /* ---------- tiny helpers ---------- */
   function $(s, el) { return (el || document).querySelector(s); }
@@ -386,9 +386,9 @@
   /* Version 2.0 header: logo (or monogram), business name in the sidebar, and a sync dot. */
   function brandHeader() {
     var st = S(), lg = $('#logo'), sb = $('#sbname');
-    if (lg) lg.innerHTML = st.logo ? '<img src="' + esc(st.logo) + '" alt="">' : '<span>' + esc(String(st.businessName || 'A').trim().charAt(0) || 'A') + '</span>';
+    if (lg) lg.innerHTML = '<img src="' + esc(st.logo || 'icons/icon-192.png') + '" alt="">';
     if (sb) sb.innerHTML = esc(st.businessName || 'Athulyam Homes') + '<small>Guest Manager</small>';
-    var bi = $('#tabs .brand i'); if (bi) bi.innerHTML = st.logo ? '<img src="' + esc(st.logo) + '" alt="" style="width:100%;height:100%;border-radius:50%;object-fit:cover;background:#fff">' : esc(String(st.businessName || 'A').trim().charAt(0) || 'A');
+    var bi = $('#tabs .brand i'); if (bi) bi.innerHTML = '<img src="' + esc(st.logo || 'icons/icon-192.png') + '" alt="" style="width:100%;height:100%;border-radius:50%;object-fit:cover;background:#fff">';
     syncDot();
   }
   function syncDot() {
