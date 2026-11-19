@@ -1,6 +1,6 @@
 /* Offline support: keeps a copy of the app files on the phone. Guest data is never cached here. */
-var CACHE = 'athulyam-v1.9.1';
-var FILES = ['./', './index.html', './app.js', './logic.js', './xlsx.js', './manifest.json',
+var CACHE = 'athulyam-v2.0.0';
+var FILES = ['./', './index.html', './app.js', './logic.js', './xlsx.js', './manifest.json', './fonts/inter-latin-wght-normal.woff2', './fonts/playfair-display-latin-600-normal.woff2',
   './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png', './icons/apple-touch-icon.png'];
 self.addEventListener('install', function (e) {
   e.waitUntil(caches.open(CACHE).then(function (c) { return c.addAll(FILES); }).then(function () { return self.skipWaiting(); }));

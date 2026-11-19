@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var A = AH, inr = A.inr, num = A.num, r2 = A.r2;
-  var APP_VERSION = '1.9.1';
+  var APP_VERSION = '2.0.0';
 
   /* ---------- tiny helpers ---------- */
   function $(s, el) { return (el || document).querySelector(s); }
@@ -25,6 +25,9 @@
     var t = $('#toast'); t.textContent = msg; t.className = 'show' + (bad ? ' bad' : '');
     clearTimeout(toast._t); toast._t = setTimeout(function () { t.className = ''; }, 2600);
   }
+
+  /* Version 2.0: a short buzz on phones that support it, after an important save. */
+  function haptic() { try { if (navigator.vibrate) navigator.vibrate(12); } catch (e) { /* not supported */ } }
 
   /* ---------- storage (IndexedDB, one record holds everything) ---------- */
   var DB_NAME = 'athulyam-homes', STORE = 'kv', KEY = 'data', FILES = 'files';
@@ -70,17 +73,42 @@
   function filePut(id, blob) { return fileOp('readwrite', function (st) { st.put(blob, id); }); }
   function fileGet(id) { return fileOp('readonly', function (st) { return st.get(id); }); }
   function fileDel(id) { return fileOp('readwrite', function (st) { st.delete(id); }); }
-  /* Shrink photos to max 2000 px on the long side, JPEG quality 0.85: ID text stays sharp, an iPhone photo of 3–8 MB
-     becomes about 0.4–0.9 MB. If the smaller copy is not smaller (already small), the original is kept. PDFs are kept as they are. */
-  function compressImage(file) {
+  /* Version 2.0: ID photos are shrunk to under 50 KB (owner's choice, to save phone and Drive space).
+     Start at 1400 px on the long side and lower the JPEG quality step by step; if still too big, shrink the size and try again.
+     The text on an Aadhaar or passport stays readable down to about 900 px. PDFs are kept as they are (they cannot be shrunk here). */
+  var DOC_MAX_BYTES = 50 * 1024;
+  function compressImage(file, opts) {
+    opts = opts || {}; var LIMIT = opts.maxBytes || DOC_MAX_BYTES;
     if (!/^image\//.test(file.type) || /svg/.test(file.type)) return Promise.resolve({ blob: file, w: 0, h: 0 });
     return new Promise(function (res) {
       var url = URL.createObjectURL(file), img = new Image();
       img.onload = function () {
-        var max = 2000, w = img.naturalWidth, h = img.naturalHeight, k = Math.min(1, max / Math.max(w, h));
-        var cv = document.createElement('canvas'); cv.width = Math.round(w * k); cv.height = Math.round(h * k);
-        var cx = cv.getContext('2d'); cx.imageSmoothingQuality = 'high'; cx.drawImage(img, 0, 0, cv.width, cv.height); URL.revokeObjectURL(url);
-        cv.toBlob(function (bl) { res({ blob: bl && bl.size < file.size ? bl : file, w: cv.width, h: cv.height }); }, 'image/jpeg', 0.85);
+        URL.revokeObjectURL(url);
+        var W = img.naturalWidth, H = img.naturalHeight, side = Math.min(opts.side || 1400, Math.max(W, H)), qs = [0.72, 0.62, 0.52, 0.44, 0.36];
+        function draw(maxSide) {
+          var k = Math.min(1, maxSide / Math.max(W, H)), cv = document.createElement('canvas');
+          cv.width = Math.max(1, Math.round(W * k)); cv.height = Math.max(1, Math.round(H * k));
+          var cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height);
+          cx.imageSmoothingQuality = 'high'; cx.drawImage(img, 0, 0, cv.width, cv.height); return cv;
+        }
+        function toBlob(cv, q) { return new Promise(function (r) { cv.toBlob(function (bl) { r(bl); }, 'image/jpeg', q); }); }
+        var best = null;
+        (function attempt(maxSide) {
+          var cv = draw(maxSide), i = 0;
+          (function nextQ() {
+            toBlob(cv, qs[i]).then(function (bl) {
+              if (bl && (!best || bl.size < best.blob.size)) best = { blob: bl, w: cv.width, h: cv.height };
+              if (bl && bl.size <= LIMIT) return finish();
+              if (++i < qs.length) return nextQ();
+              if (maxSide > 640) return attempt(Math.round(maxSide * 0.8));
+              finish();
+            });
+          })();
+        })(side);
+        function finish() {
+          if (!best || (best.blob.size >= file.size && file.size <= LIMIT)) return res({ blob: file, w: W, h: H });
+          res(best);
+        }
       };
       img.onerror = function () { URL.revokeObjectURL(url); res({ blob: file, w: 0, h: 0 }); };
       img.src = url;
@@ -109,7 +137,7 @@
       syncUrl: '', syncToken: '', autoSync: true,
       mealRates: { Breakfast: 0, Lunch: 0, Dinner: 0 }, menu: JSON.parse(JSON.stringify(A.MENU_DEFAULT)),
       services: [{ name: 'Bonfire', rate: 0 }, { name: 'Pick-up / drop', rate: 0 }, { name: 'Sightseeing', rate: 0 }],
-      tokenAmount: 500, upiId: '', autoReviewEmail: false, customFields: [], couponPrefix: 'ATH', bookingPrefix: 'ATH', keepPhotosDays: 30, uploadDocs: true,
+      tokenAmount: 500, upiId: '', autoReviewEmail: false, customFields: [], couponPrefix: 'ATH', bookingPrefix: 'ATH', keepPhotosDays: 30, uploadDocs: true, premiumStays: 3, premiumSpend: 25000,
       reviewLinks: {
         google: 'https://share.google/sGf4Yhq7SHDDbqd9y',
         'Booking.com': 'https://www.booking.com/hotel/in/athulyam-homes.html',
@@ -235,6 +263,89 @@
     return { overdue: 'Overdue', 'no-advance': 'No advance yet', pending: 'Balance pending', overpaid: 'Overpaid', 'due-today': 'Due today', 'refund-due': 'Refund due', 'fee-due': 'Fee due' }[f] || '';
   }
 
+  /* ---------- Version 2.0: guest ID numbers are shown masked ----------
+     The full number is still stored (Form C, the guest register and the Sheet need it), but the app only shows the
+     last 4 characters. "Show" reveals it for 60 seconds, after the PIN when a PIN is set. */
+  function maskVal(v) { var x = String(v || '').replace(/\s/g, ''); return !x ? '' : x.length > 4 ? '•••• ' + x.slice(-4) : x; }
+  var revealUntil = 0;
+  function askReveal() {
+    return new Promise(function (res) {
+      if (Date.now() < revealUntil) return res(true);
+      if (!S().pinHash) { revealUntil = Date.now() + 60000; return res(true); }
+      var sh = document.createElement('div'); sh.className = 'sheet-bg';
+      sh.innerHTML = '<form class="sheet" novalidate><h3>' + icon('lock') + ' Enter PIN to see full ID numbers</h3><input type="password" inputmode="numeric" autocomplete="off" maxlength="6" aria-label="PIN">' +
+        '<div class="actions"><button class="btn primary">Show</button><button type="button" class="btn" data-x>Cancel</button></div></form>';
+      document.body.appendChild(sh);
+      var inp = $('input', sh); setTimeout(function () { inp.focus(); }, 30);
+      function close(ok) { sh.remove(); res(ok); }
+      $('[data-x]', sh).onclick = function () { close(false); };
+      sh.onclick = function (e) { if (e.target === sh) close(false); };
+      $('form', sh).onsubmit = function (e) {
+        e.preventDefault();
+        hash(S().pinSalt + inp.value).then(function (h) { if (h === S().pinHash) { revealUntil = Date.now() + 60000; close(true); } else { toast('Wrong PIN', true); inp.value = ''; } });
+      };
+    });
+  }
+  /* An input for an ID / passport number. An existing number is not put in the page: the box shows its last 4 as a
+     hint and stays empty; left empty, the saved number is kept (see keepSecret). */
+  function secretInput(name, val, extra) {
+    var has = !!String(val || '').trim();
+    return '<div class="secret"><input name="' + name + '" value="" data-secret="' + (has ? '1' : '') + '" placeholder="' + (has ? 'Saved: ' + esc(maskVal(val)) + ' · type to replace' : '') + '" autocomplete="off"' + (extra || '') + '>' +
+      (has ? '<button type="button" class="btn sm" data-reveal="' + name + '">' + icon('eye') + 'Show</button>' : '') + '</div>';
+  }
+  function keepSecret(f, name, oldVal) {
+    var el = f.elements[name]; if (!el) return oldVal;
+    var v = String(el.value || '').trim();
+    return v ? v : (el.dataset.secret ? oldVal : '');
+  }
+  function bindReveal(root, getVal) {
+    $$('[data-reveal]', root).forEach(function (btn) {
+      btn.onclick = function () {
+        askReveal().then(function (ok) {
+          if (!ok) return;
+          var el = btn.parentNode.querySelector('input'), v = getVal(btn.dataset.reveal);
+          el.placeholder = 'Saved: ' + v + ' · type to replace'; btn.disabled = true; btn.innerHTML = icon('eye') + 'Shown';
+          setTimeout(function () { if (document.body.contains(el)) { el.placeholder = 'Saved: ' + maskVal(v) + ' · type to replace'; btn.disabled = false; btn.innerHTML = icon('eye') + 'Show'; } }, Math.max(0, revealUntil - Date.now()));
+        });
+      };
+    });
+  }
+
+  /* ---------- Version 2.0: repeat guests ----------
+     Past stays are found by mobile number (last 10 digits). "Premium" = at least N stays or ₹X billed in total
+     (Settings → Guest IDs & documents; starting values 3 stays / ₹25,000 are a proposal, change them to suit). */
+  function last10(p) { var d = String(p || '').replace(/\D/g, ''); return d.length >= 10 ? d.slice(-10) : ''; }
+  function guestHistory(phone, excludeId) {
+    var key = last10(phone); if (!key) return null;
+    var list = data.bookings.filter(function (b) { return b.id !== excludeId && b.status !== 'Enquiry' && last10(b.phone) === key; });
+    if (!list.length) return null;
+    var kept = list.filter(function (b) { return !A.isCancelled(b); }), st = S();
+    var total = 0, paid = 0, pending = 0;
+    kept.forEach(function (b) { var c = calc(b); total = r2(total + c.total); paid = r2(paid + c.received); if (c.outstanding > 0) pending = r2(pending + c.outstanding); });
+    var ids = list.map(function (b) { return b.id; });
+    var pays = (data.payments || []).filter(function (p) { return ids.indexOf(p.bookingId) >= 0 && p.type !== 'refund'; }).sort(function (a, b) { return a.date < b.date ? 1 : -1; });
+    var stays = kept.filter(function (b) { return b.status === 'Checked Out' || b.status === 'Checked In' || (A.isDate(b.checkIn) && b.checkIn <= today()); }).length;
+    var last = kept.slice().sort(function (a, b) { return String(a.checkIn) < String(b.checkIn) ? 1 : -1; })[0] || list[0];
+    return { list: list, stays: stays, bookings: kept.length, cancelled: list.length - kept.length, total: total, paid: paid, pending: pending, lastPay: pays[0] || null, last: last,
+      premium: stays >= num(st.premiumStays || 3) || total >= num(st.premiumSpend || 25000) };
+  }
+  function repeatTag(b) {
+    var h = guestHistory(b.phone, b.id); if (!h) return '';
+    return h.premium ? ' <span class="tag-prem">' + icon('star') + 'Premium</span>' : ' <span class="tag-rep">Returning</span>';
+  }
+  function historyCard(h, withFill) {
+    if (!h) return '';
+    return '<div class="card repeat' + (h.premium ? ' premium' : '') + '"><div class="rp-h">' + icon(h.premium ? 'star' : 'user') + '<b>' + (h.premium ? 'Premium guest' : 'Returning guest') + '</b>' +
+      '<span class="pill">' + h.stays + ' stay' + (h.stays === 1 ? '' : 's') + '</span></div>' +
+      '<div class="rp-grid"><div><small>Total billed</small><b>' + inr(h.total) + '</b></div><div><small>Paid</small><b>' + inr(h.paid) + '</b></div><div><small>Pending</small><b class="' + (h.pending > 0 ? 'due' : '') + '">' + inr(h.pending) + '</b></div></div>' +
+      '<p class="small">Latest booking: <a href="#/guest/' + h.last.id + '">' + esc(gname(h.last)) + ' · ' + fmtShort(h.last.checkIn) + ' → ' + fmtShort(h.last.checkOut) + '</a>' +
+      (h.lastPay ? ' · Last payment ' + inr(h.lastPay.amount) + ' (' + esc(h.lastPay.method) + ', ' + fmtShort(h.lastPay.date) + ')' : ' · No payments recorded') + (h.cancelled ? ' · ' + h.cancelled + ' cancelled' : '') + '</p>' +
+      (withFill ? '<button type="button" class="btn sm" id="rpfill">' + icon('user') + 'Fill guest details</button>' : '') + '</div>';
+  }
+
+  /* ---------- Version 2.0: icons (drawn in index.html, so they work offline) ---------- */
+  function icon(n, cls) { return '<svg class="ic' + (cls ? ' ' + cls : '') + '" aria-hidden="true"><use href="#i-' + n + '"/></svg>'; }
+
   /* ---------- routing ---------- */
   var routes = {};
   function go(h) { if (location.hash === h) render(); else location.hash = h; }
@@ -246,12 +357,36 @@
     var name = parts[0] || 'home', arg = parts.slice(1).join('/');
     var v = (routes[name] || routes.home)(decodeURIComponent(arg || ''));
     $('#title').textContent = v.title || S().businessName;
-    $('#back').style.visibility = v.back ? 'visible' : 'hidden';
+    $('#back').style.display = v.back ? 'flex' : 'none'; $('#logo').style.display = v.back ? 'none' : '';
     $('#back').onclick = function () { if (history.length > 1) history.back(); else go(v.back); };
-    $('#main').innerHTML = v.html;
-    $$('#tabs a').forEach(function (a) { a.classList.toggle('on', (v.tab || name) === a.dataset.tab); });
+    var m = $('#main'); m.innerHTML = v.html;
+    if (scroll) { m.classList.remove('enter'); void m.offsetWidth; m.classList.add('enter'); }
+    var side = $$('#tabs a.side-only').filter(function (a) { return a.getAttribute('href') === '#/' + name; })[0];
+    $$('#tabs a').forEach(function (a) { a.classList.toggle('on', side ? a === side : (v.tab || name) === a.dataset.tab); });
+    brandHeader();
     if (v.after) v.after();
     if (scroll) window.scrollTo(0, 0);
+  }
+
+  /* Version 2.0 header: logo (or monogram), business name in the sidebar, and a sync dot. */
+  function brandHeader() {
+    var st = S(), lg = $('#logo'), sb = $('#sbname');
+    if (lg) lg.innerHTML = st.logo ? '<img src="' + esc(st.logo) + '" alt="">' : '<span>' + esc(String(st.businessName || 'A').trim().charAt(0) || 'A') + '</span>';
+    if (sb) sb.innerHTML = esc(st.businessName || 'Athulyam Homes') + '<small>Guest Manager</small>';
+    var bi = $('#tabs .brand i'); if (bi) bi.innerHTML = st.logo ? '<img src="' + esc(st.logo) + '" alt="" style="width:100%;height:100%;border-radius:50%;object-fit:cover;background:#fff">' : esc(String(st.businessName || 'A').trim().charAt(0) || 'A');
+    syncDot();
+  }
+  function syncDot() {
+    if (!data) return;
+    var st = S(), m = data.meta, cls = 'off', tip = 'Cloud sync not set up';
+    if (st.syncUrl) {
+      if (syncing) { cls = 'busy'; tip = 'Syncing…'; }
+      else if (!navigator.onLine) { cls = 'off'; tip = 'Offline — saved on this device'; }
+      else if (m.lastSyncError) { cls = 'err'; tip = 'Last sync failed — tap to retry'; }
+      else if (m.lastSync) { cls = 'ok'; tip = 'Synced ' + new Date(m.lastSync).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }); }
+    }
+    $$('.syncdot').forEach(function (d) { d.className = 'syncdot ' + cls; d.title = tip; d.setAttribute('aria-label', tip); d.onclick = function () { if (st.syncUrl) syncNow(true); else go('#/settings'); }; });
+    var lab = $('#synclabel'); if (lab) lab.textContent = tip;
   }
 
   /* ---------- reusable bits ---------- */
@@ -263,9 +398,9 @@
   function bookingCard(b, opts) {
     var c = calc(b), flag = A.paymentFlags(b, c, today());
     return '<a class="card bk" href="#/guest/' + b.id + '">' +
-      '<div class="bk-top"><b>' + esc(gname(b)) + '</b><span class="st ' + statusClass(b.status) + '">' + esc(b.status) + '</span></div>' +
+      '<div class="bk-top"><b>' + esc(gname(b)) + repeatTag(b) + '</b><span class="st ' + statusClass(b.status) + '">' + esc(b.status) + '</span></div>' +
       '<div class="bk-mid">' + esc(roomsLabel(b)) + ' · ' + fmtShort(b.checkIn) + ' → ' + fmtShort(b.checkOut) + (A.stayLabel(b) ? ' · ' + A.stayLabel(b) : '') + ' · ' + esc(b.source) + '</div>' +
-      (opts && opts.phone && b.phone ? '<div class="bk-mid">☎ ' + esc(b.phone) + '</div>' : '') +
+      (opts && opts.phone && b.phone ? '<div class="bk-mid">' + icon('phone') + ' ' + esc(b.phone) + '</div>' : '') +
       '<div class="bk-bot"><span>Bill ' + inr(c.total) + '</span><span>Paid ' + inr(c.received) + '</span><span class="' + (c.outstanding > 0 ? 'due' : '') + '">Due ' + inr(Math.max(c.outstanding, 0)) + '</span></div>' +
       (flag ? '<div class="flag fl-' + flag + '">' + flagLabel(flag) + '</div>' : '') +
       (missingBits(b).length ? '<div class="flag fl-pending">Incomplete: ' + esc(missingBits(b).join(', ')) + '</div>' : '') +
@@ -354,49 +489,60 @@
     if (xc.length) out.push({ cls: 'red', text: 'Possible double booking: ' + xc.length + ' stay' + (xc.length > 1 ? 's' : '') + ' in the app clash with dates blocked on ' + xc.map(function (c) { return A.otaName(c.x.p); }).filter(function (v, i, a) { return a.indexOf(v) === i; }).join(', '), href: '#/guest/' + xc[0].b.id });
     var cfail = Object.keys(((data.ext || {}).status) || {}).filter(function (k) { return !data.ext.status[k].ok; });
     if (cfail.length) out.push({ cls: 'amber', text: cfail.length + ' platform calendar link' + (cfail.length > 1 ? 's' : '') + ' could not be read at the last check', href: '#/otacal' });
-    var dirty = S().rooms.filter(function (r) { return r.active !== false && r.clean === false; });
-    if (dirty.length) out.push({ cls: 'grey', text: dirty.length + ' room' + (dirty.length > 1 ? 's' : '') + ' need cleaning: ' + dirty.map(function (r) { return r.name; }).join(', '), href: '#/calendar' });
+    var notReady = physicalRooms().filter(function (r) { var x = roomToday(r, t); return x.arr && hkOf(r) !== 'ready'; });
+    if (notReady.length) out.push({ cls: 'red', text: notReady.length + ' room' + (notReady.length > 1 ? 's' : '') + ' not ready for today’s arrival: ' + notReady.map(function (r) { return r.name; }).join(', '), href: '#/housekeeping' });
     return out;
   }
 
+  /* Pipeline tiles (queries, conversion, payments). Version 2.0: tiles with nothing to show are left out. */
   function dashboardHtml() {
-    var d = A.dashboard(data, today()), q = d.queries, b = d.bookings, p = d.payments;
-    return '<h2>Dashboard <a class="more" href="#/queries">Queries ›</a></h2><div class="tiles">' +
-      tile('Queries open', String(q.open), q.answered + ' answered, waiting on guest', q.open ? 'warnv' : '') +
-      tile('Converted this month', q.conversionPctThisMonth + '%', q.closedBookedThisMonth + ' booked · ' + q.closedNotBookedThisMonth + ' not booked') +
-      tile('Waiting for check-in', String(b.waitingCheckIn), b.checkedIn + ' checked in now') +
-      tile('Payment status', p.paid + ' paid', p.partPaid + ' part paid · ' + p.unpaid + ' unpaid', p.unpaid ? 'warnv' : '') +
-      tile('Checked out this month', String(b.checkedOutThisMonth), b.cancelledThisMonth + ' cancelled') +
-      tile('Bookings from queries', String(b.fromQueriesThisMonth), 'this month') + '</div>';
+    var d = A.dashboard(data, today()), q = d.queries, b = d.bookings, p = d.payments, tiles = [];
+    if (q.open || q.answered) tiles.push(tile('Queries open', String(q.open), q.answered + ' answered, waiting on guest', q.open ? 'warnv' : ''));
+    if (q.closedBookedThisMonth || q.closedNotBookedThisMonth) tiles.push(tile('Converted this month', q.conversionPctThisMonth + '%', q.closedBookedThisMonth + ' booked · ' + q.closedNotBookedThisMonth + ' not booked'));
+    if (b.waitingCheckIn || b.checkedIn) tiles.push(tile('Waiting for check-in', String(b.waitingCheckIn), b.checkedIn + ' checked in now'));
+    if (p.paid || p.partPaid || p.unpaid) tiles.push(tile('Payment status', p.paid + ' paid', p.partPaid + ' part paid · ' + p.unpaid + ' unpaid', p.unpaid ? 'warnv' : ''));
+    if (b.checkedOutThisMonth || b.cancelledThisMonth) tiles.push(tile('Checked out this month', String(b.checkedOutThisMonth), b.cancelledThisMonth + ' cancelled'));
+    if (b.fromQueriesThisMonth) tiles.push(tile('Bookings from queries', String(b.fromQueriesThisMonth), 'this month'));
+    if (!tiles.length) return '';
+    return '<h2>Pipeline <a class="more" href="#/queries">Queries ›</a></h2><div class="tiles t3">' + tiles.join('') + '</div>';
   }
+  function miniList(list, emptyText) {
+    if (!list.length) return '<p class="tc-empty">' + esc(emptyText) + '</p>';
+    return list.slice(0, 4).map(function (b) { return '<a href="#/guest/' + b.id + '"><span>' + esc(gname(b)) + '</span><small>' + esc(roomsLabel(b)) + '</small></a>'; }).join('') + (list.length > 4 ? '<a href="#/today" class="tc-more">+' + (list.length - 4) + ' more</a>' : '');
+  }
+  function greeting() { var h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening'; }
 
-  /* ---------- HOME ---------- */
+  /* ---------- HOME (version 2.0 layout: today first, then money, rooms, pipeline) ---------- */
   routes.home = function () {
-    var t = today(), dr = A.dailyReport(data, t), mr = A.monthlyReport(data, thisMonth());
+    var t = today(), dr = A.dailyReport(data, t), mr = A.monthlyReport(data, thisMonth()), lm = A.monthlyReport(data, A.prevMonth(thisMonth()));
     var fut = A.futureBookings(data, A.addDays(t, 1)).slice(0, 5);
-    var pend = A.outstandingAll(data).filter(function (x) { return x.c.outstanding > 0; })
-      .sort(function (a, b) { return a.b.checkIn < b.b.checkIn ? -1 : 1; }).slice(0, 5);
-    var al = alerts();
-    var html = '<div class="today-line">' + fmtDate(t) + '</div>' +
-      al.map(function (a) { return '<a class="alert ' + a.cls + '" href="' + a.href + '">' + esc(a.text) + ' ›</a>'; }).join('') +
-      '<a class="cta" href="#/new">＋ Add New Booking</a><a class="cta small alt" href="#/qnew">＋ Add New Query</a>' +
-      dashboardHtml() +
-      '<h2>Today’s check-ins <a class="more" href="#/today">All ›</a></h2>' +
-      (dr.checkIns.length ? dr.checkIns.map(function (b) { return bookingCard(b, { phone: true }); }).join('') : empty('No check-ins today.')) +
-      '<h2>Today <a class="more" href="#/daily">Report ›</a></h2><div class="tiles">' +
-      tile('Billed today', inr(dr.revenue.billed), 'room ' + inr(dr.revenue.room) + ' · food ' + inr(dr.revenue.food)) +
+    var owed = A.outstandingAll(data).filter(function (x) { return x.c.outstanding > 0; }).sort(function (a, b) { return a.b.checkIn < b.b.checkIn ? -1 : 1; });
+    var owedSum = A.sum(owed, function (x) { return x.c.outstanding; });
+    var al = alerts(), rooms = physicalRooms(), hc = { dirty: 0, cleaning: 0, ready: 0 }; rooms.forEach(function (r) { hc[hkOf(r)]++; });
+    var cc = closeOf(t);
+    var html = '<div class="hello"><div><small>' + fmtDate(t) + '</small><h2 class="hello-h">' + greeting() + '</h2></div>' +
+      '<div class="hello-act"><a class="btn primary" href="#/new">' + icon('plus') + 'Booking</a><a class="btn" href="#/qnew">' + icon('plus') + 'Query</a></div></div>' +
+      (al.length ? '<div class="alerts">' + al.sort(function (a, b) { return (a.cls === 'red' ? 0 : 1) - (b.cls === 'red' ? 0 : 1); }).map(function (a, i) { return '<a class="alert ' + a.cls + (i > 1 ? ' extra' : '') + '" href="' + a.href + '">' + icon(a.cls === 'grey' ? 'info' : 'alert') + '<span>' + esc(a.text) + '</span>' + icon('chev-right', 'end') + '</a>'; }).join('') +
+        (al.length > 2 ? '<button type="button" class="link alerts-more" onclick="this.parentNode.classList.add(\'all\');this.remove()">Show ' + (al.length - 2) + ' more alert' + (al.length > 3 ? 's' : '') + '</button>' : '') + '</div>' : '') +
+      '<div class="todaygrid">' +
+      '<div class="tcard"><div class="tc-h">' + icon('login') + 'Arrivals<b>' + dr.checkIns.length + '</b></div>' + miniList(dr.checkIns, 'No arrivals today') + '</div>' +
+      '<div class="tcard"><div class="tc-h">' + icon('logout') + 'Departures<b>' + dr.checkOuts.length + '</b></div>' + miniList(dr.checkOuts, 'No departures today') + '</div>' +
+      '<div class="tcard"><div class="tc-h">' + icon('bed') + 'In-house<b>' + dr.inHouse.length + '</b></div>' + miniList(dr.inHouse, 'No guests in-house') + '</div></div>' +
+      '<h2>Money <a class="more" href="#/monthly">' + fmtMonth(thisMonth()) + ' ›</a></h2><div class="tiles t4">' +
+      tile('Revenue this month', inr(mr.revenue.taxable), changeBadge(mr.revenue.taxable, lm.revenue.taxable) + ' vs last month') +
       tile('Collected today', inr(dr.collections.net), 'cash ' + inr(dr.collections.byMethod.Cash) + ' · UPI ' + inr(dr.collections.byMethod.UPI)) +
-      tile('In-house', String(dr.inHouse.length), dr.checkOuts.length + ' checking out') +
-      tile('Net after commission', inr(dr.revenue.net), 'GST excluded') + '</div>' +
-      '<h2>' + fmtMonth(thisMonth()) + ' <a class="more" href="#/monthly">Report ›</a></h2><div class="tiles">' +
-      tile('Gross revenue', inr(mr.revenue.taxable), 'before GST, after discounts') +
-      tile('Collected', inr(mr.collections.net), 'payments this month') +
-      tile('Net after commission', inr(mr.revenue.net), 'commission ' + inr(mr.revenue.commission)) +
-      tile('Profit after expenses', inr(mr.profit), 'expenses ' + inr(mr.expenses), mr.profit < 0 ? 'neg' : '') + '</div>' +
-      '<h2>Upcoming bookings <a class="more" href="#/future">All ›</a></h2>' +
+      '<a class="tile tlink' + (owedSum > 0 ? ' warnv' : '') + '" href="#/pending"><div class="tl">Owed to you</div><div class="tv">' + inr(owedSum) + '</div><div class="ts">' + owed.length + ' booking' + (owed.length === 1 ? '' : 's') + '</div></a>' +
+      tile('Profit this month', inr(mr.profit), 'after ' + inr(mr.expenses) + ' expenses', mr.profit < 0 ? 'neg' : '') + '</div>' +
+      '<div class="duo">' +
+      '<a class="card linkcard" href="#/housekeeping"><div class="lc-h">' + icon('broom') + '<b>Housekeeping</b>' + icon('chev-right', 'end') + '</div>' +
+      '<div class="hkmini"><span class="dirty"><b>' + hc.dirty + '</b> dirty</span><span class="cleaning"><b>' + hc.cleaning + '</b> cleaning</span><span class="ready"><b>' + hc.ready + '</b> ready</span></div></a>' +
+      '<a class="card linkcard" href="#/cashclose"><div class="lc-h">' + icon('wallet') + '<b>Daily cash close</b>' + icon('chev-right', 'end') + '</div>' +
+      '<div class="hkmini">' + (cc ? '<span class="ready">' + icon('check') + 'Closed today' + (Math.abs(num(cc.cashDiff)) >= 0.5 ? ' · cash ' + (cc.cashDiff > 0 ? 'extra ' : 'short ') + inr(Math.abs(cc.cashDiff)) : '') + '</span>' : '<span>Not closed yet · cash in ' + inr(dr.collections.byMethod.Cash) + '</span>') + '</div></a></div>' +
+      dashboardHtml() +
+      (dr.checkIns.length ? '<h2>Today’s check-ins <a class="more" href="#/today">All ›</a></h2>' + dr.checkIns.map(function (b) { return bookingCard(b, { phone: true }); }).join('') : '') +
+      '<h2>Upcoming <a class="more" href="#/future">All ›</a></h2>' +
       (fut.length ? fut.map(function (b) { return bookingCard(b); }).join('') : empty('No upcoming bookings.')) +
-      '<h2>Pending payments <a class="more" href="#/pending">All ›</a></h2>' +
-      (pend.length ? pend.map(function (x) { return bookingCard(x.b); }).join('') : empty('Nothing pending. All balances are clear.')) + syncCard();
+      (owed.length ? '<h2>Pending payments <a class="more" href="#/pending">All ›</a></h2>' + owed.slice(0, 5).map(function (x) { return bookingCard(x.b); }).join('') : '') + syncCard();
     return { title: S().businessName, html: html, tab: 'home', after: bindSyncCard };
   };
 
@@ -449,41 +595,43 @@
   };
   function bookingForm(title) {
     var b = formState.b, e = formState.errors, s = S();
-    var idHint = s.idMode === 'full' ? 'Full ID number is stored.' : 'Only the last 4 characters are kept, e.g. 4821.';
+    var idHint = s.idMode === 'full' ? 'Kept in full for the guest register; shown only as the last 4.' : 'Only the last 4 characters are kept, e.g. 4821.';
     var html = (b.queryId ? '<div class="ok">Converted from a query. The guest details are filled in — add the room, dates and charges, then save.</div>' : '') +
       '<form id="bf" novalidate>' +
+      '<nav class="formnav noprint">' + [['fg-guest', 'Guest'], ['fg-stay', 'Stay'], ['fg-food', 'Food'], ['fg-bill', 'Bill'], formState.isNew ? ['fg-pay', 'Payment'] : null, ['fg-notes', 'Notes']].filter(Boolean).map(function (x) { return '<button type="button" data-jump="' + x[0] + '">' + x[1] + '</button>'; }).join('') + '</nav>' +
       '<p class="small">Every field is optional. Fill in what you have now and the rest later; the booking shows “Incomplete” until name, mobile, dates and room are in.</p>' +
-      '<div class="card"><h3>Guest</h3>' +
+      '<div class="card" id="fg-guest"><h3>' + icon('user') + 'Guest</h3>' +
       field('Full name', '<input name="guestName" value="' + esc(b.guestName) + '" autocomplete="off">', e.guestName) +
       field('Mobile number', '<input name="phone" type="tel" inputmode="tel" value="' + esc(b.phone) + '" placeholder="98XXXXXXXX">', e.phone, 'Used for WhatsApp messages. Indian numbers get +91 automatically.') +
+      '<div id="repeat"></div>' +
       field('Email', '<input name="email" type="email" inputmode="email" value="' + esc(b.email) + '" placeholder="For the review request email">', e.email) +
       '<div class="two">' + field('Nationality', '<select name="nationality">' + options(['Indian', 'Foreign'], b.nationality) + '</select>', e.nationality) +
       field('Country', '<input name="country" value="' + esc(b.country) + '" placeholder="If foreign">', e.country) + '</div>' +
       '<div class="two">' + field('Gender', '<select name="gender">' + options(['', 'Male', 'Female', 'Other'], b.gender || '', function (x) { return x || 'Choose'; }) + '</select>', e.gender) +
       field('Address (city, state)', '<input name="address" value="' + esc(b.address || '') + '">', e.address) + '</div>' +
       '<div class="two">' + field('ID type', '<select name="idType">' + options(s.idTypes, b.idType) + '</select>', e.idType) +
-      field('ID number', '<input name="idValue" value="' + esc(b.idValue) + '" ' + (s.idMode === 'full' ? '' : 'maxlength="4"') + ' autocomplete="off">', e.idValue, idHint) + '</div>' +
+      field('ID number', secretInput('idValue', b.idValue, s.idMode === 'full' ? '' : ' maxlength="4"'), e.idValue, idHint) + '</div>' +
       '<p class="small">This is the main guest. Add everyone else, their ID photos, passports and visas on the booking page after saving (Guests & IDs).</p>' +
       '<div class="two">' + field('Adults', '<input name="adults" type="number" inputmode="numeric" min="0" value="' + esc(b.adults) + '">', e.adults) +
       field('Children', '<input name="children" type="number" inputmode="numeric" min="0" value="' + esc(b.children) + '">', e.children) + '</div></div>' +
 
-      '<div class="card"><h3>Stay</h3>' +
+      '<div class="card" id="fg-stay"><h3>' + icon('bed') + 'Stay</h3>' +
       '<div class="two">' + field('Check-in', '<input name="checkIn" type="date" value="' + esc(b.checkIn) + '">', e.checkIn) +
       field('Check-out', '<input name="checkOut" type="date" value="' + esc(b.checkOut) + '">', e.checkOut) + '</div>' +
       '<div class="nights" id="nights"></div>' +
       '<div class="fld"><span>Rooms <small style="display:inline">— filled from the tariff × nights; type over it to change</small></span><div id="roomsBox"></div>' + (e.roomId ? '<em class="err">' + esc(e.roomId) + '</em>' : '') + '</div>' +
-      '<div class="actions"><button type="button" class="btn sm" id="addRoom">＋ Add room</button><button type="button" class="btn sm" id="ratecard">Recalculate all from tariff</button></div>' +
+      '<div class="actions"><button type="button" class="btn sm" id="addRoom">' + icon('plus') + 'Add room</button><button type="button" class="btn sm" id="ratecard">Recalculate all from tariff</button></div>' +
       '<div class="two">' + field('Booking source', '<select name="source">' + options(s.sources.filter(function (x) { return x !== 'Not recorded' || x === b.source; }), b.source) + '</select>') +
       field('Status', '<select name="status">' + options(A.STATUSES.concat(A.STATUSES.indexOf(b.status) < 0 ? [b.status] : []), b.status) + '</select>') + '</div>' +
       '<div id="overlap"></div></div>' +
 
-      '<div class="card"><h3>Food & services (day by day)</h3>' +
+      '<div class="card" id="fg-food"><h3>' + icon('food') + 'Food & services (day by day)</h3>' +
       '<p class="small">Tick a meal to charge it: persons fill in from the guests on the booking and the price from your meal rates (More → Settings). Change any number by hand. Days with nothing on them are left off the bill.</p>' +
       '<div id="quickMeals" class="actions"></div><div id="daysBox"></div>' +
-      '<details class="fld" id="wholeBox"' + ((b.charges || []).some(function (c) { return !(num(c.day) > 0); }) ? ' open' : '') + '><summary>Other charges for the whole stay (not day-wise)</summary><div id="chargesBox"></div><div class="actions"><button type="button" class="btn sm" id="addCharge">＋ Add charge</button></div></details>' +
+      '<details class="fld" id="wholeBox"' + ((b.charges || []).some(function (c) { return !(num(c.day) > 0); }) ? ' open' : '') + '><summary>Other charges for the whole stay (not day-wise)</summary><div id="chargesBox"></div><div class="actions"><button type="button" class="btn sm" id="addCharge">' + icon('plus') + 'Add charge</button></div></details>' +
       '</div>' +
 
-      '<div class="card"><h3>Discount, commission & GST (₹)</h3>' +
+      '<div class="card" id="fg-bill"><h3>' + icon('receipt') + 'Discount, commission & GST (₹)</h3>' +
       '<div class="two">' + field('Room charges (total)', '<input name="roomTotalView" readonly tabindex="-1" value="">', e.room, 'Sum of the room lines above.') +
       field('Food & services (total)', '<input name="extrasView" readonly tabindex="-1" value="">') + '</div>' +
       '<div class="two">' + field('Discount', '<input name="discount" type="number" inputmode="decimal" min="0" step="any" value="' + esc(b.discount) + '">', e.discount) +
@@ -499,17 +647,18 @@
       field('Commission on fee', '<input name="cancelCommission" type="number" inputmode="decimal" min="0" step="any" value="' + esc(b.cancelCommission) + '">', e.cancelCommission) + '</div></div>' +
       '<div class="calcbox" id="calcbox"></div></div>' +
 
-      (formState.isNew ? '<div class="card"><h3>Payments received now</h3><div id="paysBox"></div><div class="actions"><button type="button" class="btn sm" id="addPay">＋ Add payment</button></div><p class="small">Add one line per payment, e.g. advance by UPI and balance in cash. Lines left without an amount are ignored. Later payments: Record payment on the booking page.</p></div>' : '') +
+      (formState.isNew ? '<div class="card" id="fg-pay"><h3>' + icon('rupee') + 'Payments received now</h3><div id="paysBox"></div><div class="actions"><button type="button" class="btn sm" id="addPay">' + icon('plus') + 'Add payment</button></div><p class="small">Add one line per payment, e.g. advance by UPI and balance in cash. Lines left without an amount are ignored. Later payments: Record payment on the booking page.</p></div>' : '') +
       ((s.customFields || []).filter(function (x) { return x.label; }).length ? '<div class="card"><h3>More details</h3>' + s.customFields.filter(function (x) { return x.label; }).map(function (cf) {
         return field(esc(cf.label), '<input data-cf="' + esc(cf.id) + '" value="' + esc((b.custom || {})[cf.id] || '') + '">');
       }).join('') + '</div>' : '') +
 
-      '<div class="card"><h3>Notes</h3>' +
+      '<div class="card" id="fg-notes"><h3>' + icon('note') + 'Notes</h3>' +
       field('Special requests', '<textarea name="specialRequests" rows="2">' + esc(b.specialRequests) + '</textarea>') +
       '<details class="fld"><summary>Bill to a company (for GST invoice)</summary><div class="two">' + field('Company name', '<input name="billTo" value="' + esc(b.billTo || '') + '">') + field('Company GSTIN', '<input name="billGstin" value="' + esc(b.billGstin || '') + '" autocapitalize="characters" maxlength="15">') + '</div></details>' +
       field('Internal notes (not on bill)', '<textarea name="notes" rows="2">' + esc(b.notes) + '</textarea>') + '</div>' +
       '<div class="errsum" id="errsum"></div>' +
       '<button class="btn primary big" type="submit">Save booking</button>' +
+      '<div class="sumbar noprint" id="sumbar"></div>' +
       (formState.isNew ? '' : '<button class="btn danger" type="button" id="del">Delete booking</button>') +
       '</form>';
     return { title: title, html: html, back: '#/bookings', tab: 'bookings', after: bindForm };
@@ -541,10 +690,11 @@
   function mealRate(m) { return num((S().mealRates || {})[m]); }
   function serviceRate(name) { var x = (S().services || []).filter(function (v) { return v.name === name; })[0]; return x ? num(x.rate) : 0; }
   function readForm() {
-    var f = $('#bf'), b = formState.b;
+    var f = $('#bf'), b = formState.b, oldId = b.idValue;
     ['guestName', 'phone', 'email', 'nationality', 'country', 'idType', 'idValue', 'adults', 'children', 'checkIn', 'checkOut', 'source', 'status',
       'discount', 'commission', 'gstRoomRate', 'gstFoodRate', 'gstOtherRate', 'specialRequests', 'notes', 'cancelFee', 'cancelCommission', 'billTo', 'billGstin', 'gender', 'address']
       .forEach(function (k) { if (f.elements[k]) b[k] = f.elements[k].value; });
+    b.idValue = keepSecret(f, 'idValue', oldId);
     b.gstOn = f.elements.gstOn.checked;
     var lines = $$('#roomsBox .roomline', f);
     b.rooms = lines.map(function (ln, i) {
@@ -562,6 +712,28 @@
     return b;
   }
   function bindForm() {
+    $$('[data-jump]').forEach(function (x) { x.onclick = function () { var el = document.getElementById(x.dataset.jump); if (el) window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - 118, behavior: 'smooth' }); }; });
+    function drawRepeat() {
+      var f0 = $('#bf'), h = guestHistory(f0.elements.phone.value, formState.b.id), box = $('#repeat'); if (!box) return;
+      box.innerHTML = historyCard(h, true);
+      var fb = $('#rpfill'); if (!fb) return;
+      fb.onclick = function () {
+        /* newest non-empty value of each field across the guest's bookings */
+        var f1 = $('#bf'), hist = h.list.slice().sort(function (a, b) { return String(a.checkIn) < String(b.checkIn) ? 1 : -1; });
+        function pick(fn) { for (var i = 0; i < hist.length; i++) { var v = fn(hist[i], A.guestsOf(hist[i]).filter(function (g) { return g.primary; })[0] || {}); if (v && String(v).trim()) return v; } return ''; }
+        var src = { checkIn: hist[0].checkIn, idValue: pick(function (x, g) { return x.idValue || g.idNumber; }) };
+        var vals = { guestName: pick(function (x) { return x.guestName; }), email: pick(function (x) { return x.email; }), nationality: pick(function (x) { return x.nationality; }), country: pick(function (x) { return x.country; }),
+          gender: pick(function (x, g) { return x.gender || g.gender; }), address: pick(function (x, g) { return x.address || g.address; }), idType: pick(function (x, g) { return x.idType || g.idType; }) };
+        Object.keys(vals).forEach(function (k) { if (f1.elements[k] && vals[k] && !String(f1.elements[k].value || '').trim() || (f1.elements[k] && vals[k] && f1.elements[k].tagName === 'SELECT')) f1.elements[k].value = vals[k]; });
+        if (src.idValue && !String(f1.elements.idValue.value).trim()) {
+          formState.b.idValue = src.idValue; var el = f1.elements.idValue; el.dataset.secret = '1'; el.placeholder = 'Saved: ' + maskVal(src.idValue) + ' · type to replace';
+        }
+        fb.disabled = true; fb.innerHTML = icon('check') + 'Details filled'; toast('Guest details filled from earlier stays');
+      };
+    }
+    var rpT; $('#bf').elements.phone.addEventListener('input', function () { clearTimeout(rpT); rpT = setTimeout(drawRepeat, 250); });
+    drawRepeat();
+    bindReveal($('#bf'), function () { return formState.b.idValue; });
     var f = $('#bf');
     function roomOpts(sel) {
       var b = formState.b, list = S().rooms.filter(function (r) { return r.active !== false || A.roomIds(b).indexOf(r.id) >= 0; });
@@ -643,7 +815,7 @@
               '<button type="button" class="x" data-rmsvc="' + x.i + '" aria-label="Remove service">−</button>' +
               (sel === '__other' ? '<input data-sx="' + x.i + '" value="' + esc(x.c.name || '') + '" placeholder="What for, e.g. guided trek" aria-label="Service name">' : '') + '</div>';
           }).join('');
-          html += '<div class="actions"><button type="button" class="btn sm" data-addsvc="' + d + '">＋ Service on day ' + d + '</button></div></details>';
+          html += '<div class="actions"><button type="button" class="btn sm" data-addsvc="' + d + '">' + icon('plus') + 'Service on day ' + d + '</button></div></details>';
         }
         $('#daysBox').innerHTML = html;
       }
@@ -763,6 +935,9 @@
       var n = A.nights(b.checkIn, b.checkOut);
       $('#nights').textContent = n > 0 ? A.stayLabel(b) + ' · ' + (n + 1) + ' days, ' + n + ' night' + (n > 1 ? 's' : '') : (A.isDate(b.checkIn) && A.isDate(b.checkOut) ? 'Check-out must be after check-in' : 'Dates not set yet');
       var c = calc(b);
+      var paidNow = formState.isNew ? A.sum((formState.pays || []).filter(function (p) { return num(p.amount) > 0; }), function (p) { return p.amount; }) : c.received;
+      $('#sumbar').innerHTML = '<div><small>' + (n > 0 ? n + ' night' + (n > 1 ? 's' : '') + ' · ' : '') + esc(roomsLabel(b)) + '</small><b>' + inr(b.status === 'Cancelled' ? c.cancelFee : c.total) + '</b>' +
+        '<small>' + (paidNow > 0 ? 'Paid ' + inr(paidNow) + ' · due ' + inr(Math.max(0, r2((b.status === 'Cancelled' ? c.cancelFee : c.total) - paidNow))) : 'No payment yet') + '</small></div><button type="submit" class="btn primary">Save</button>';
       $('#calcbox').innerHTML = (b.status === 'Cancelled' ? row('Cancellation fee', inr(c.cancelFee)) : billRows(b, c)) +
         row('Total bill', inr(c.total), 'strong') +
         row('Commission (your expense)', inr(c.commission), 'muted') + row('Net after commission (excl. GST)', inr(c.net), 'muted');
@@ -878,7 +1053,7 @@
     var html = '<div class="searchbar"><input id="q" type="search" placeholder="Search name, phone, room, platform, date…" value="' + esc(listFilter.q) + '"></div>' +
       '<div class="chips" id="stchips">' + ['All'].concat(A.STATUSES).map(function (x) { return '<button class="chip' + (listFilter.status === x ? ' on' : '') + '" data-v="' + esc(x) + '">' + esc(x) + '</button>'; }).join('') + '</div>' +
       '<select id="srcf" class="inline">' + options(['All'].concat(s.sources), listFilter.source, function (x) { return x === 'All' ? 'All platforms' : x; }) + '</select>' +
-      '<a class="cta small" href="#/new">＋ Add New Booking</a><div id="list"></div>';
+      '<a class="cta small" href="#/new">' + icon('plus') + 'Add New Booking</a><div id="list"></div>';
     return {
       title: 'Guest records', html: html, tab: 'bookings', after: function () {
         function draw() {
@@ -912,15 +1087,16 @@
     if (b.status === 'Confirmed') actions += '<button class="btn primary" data-st="Checked In">Check in</button>';
     if (b.status === 'Checked In') actions += '<button class="btn primary" data-st="Checked Out">Check out</button>';
     var msgs = whatsappTemplates(b, c);
-    var html = '<div class="card hero"><div class="bk-top"><b class="name">' + esc(gname(b)) + '</b><span class="st ' + statusClass(b.status) + '">' + esc(b.status) + '</span></div>' +
+    var hist = guestHistory(b.phone, b.id);
+    var html = '<div class="card hero"><div class="bk-top"><b class="name">' + esc(gname(b)) + (hist && hist.premium ? ' <span class="tag-prem">' + icon('star') + 'Premium</span>' : '') + '</b><span class="st ' + statusClass(b.status) + '">' + esc(b.status) + '</span></div>' +
       '<div class="bk-mid">' + esc(roomsLabel(b)) + ' · ' + (A.isDate(b.checkIn) ? fmtDate(b.checkIn) + ' → ' + fmtDate(b.checkOut) + (A.stayLabel(b) ? ' · ' + A.stayLabel(b) : '') : 'Dates not set') + '</div>' +
       '<div class="bk-mid">' + esc(b.no ? b.no + ' · ' : '') + esc(b.source) + ' · ' + b.adults + ' adult' + (b.adults == 1 ? '' : 's') + (num(b.children) ? ', ' + b.children + ' child' + (b.children == 1 ? '' : 'ren') : '') + '</div>' +
-      (b.phone ? '<div class="bk-mid"><a href="tel:' + esc(b.phone) + '">☎ ' + esc(b.phone) + '</a></div>' : '') +
+      (b.phone ? '<div class="bk-mid"><a href="tel:' + esc(b.phone) + '">' + icon('phone') + ' ' + esc(b.phone) + '</a></div>' : '') +
       '<div class="big3"><div><small>Total bill</small><b>' + inr(c.total) + '</b></div><div><small>Received</small><b>' + inr(c.received) + '</b></div><div><small>' + (c.outstanding < 0 ? 'Refund due' : 'Balance') + '</small><b class="' + (c.outstanding > 0 ? 'due' : '') + '">' + inr(Math.abs(c.outstanding)) + '</b></div></div>' +
       (flag ? '<div class="flag fl-' + flag + '">' + flagLabel(flag) + '</div>' : '') +
       (missingBits(b).length ? '<div class="flag fl-pending">Still to add: ' + esc(missingBits(b).join(', ')) + '</div>' : '') + '</div>' +
       '<div class="actions">' + actions + '<a class="btn" href="#/pay/' + b.id + '">Record payment</a><a class="btn" href="#/pay/' + b.id + '/refund">Record refund</a><a class="btn" href="#/edit/' + b.id + '">Edit</a></div>' +
-      guestsCard(b) + fsCard(b, c) +
+      historyCard(hist, false) + guestsCard(b) + fsCard(b, c) +
       '<div class="card"><h3>Bill breakdown</h3>' +
       (A.isCancelled(b) ? row('Cancellation fee kept', inr(c.cancelFee)) : billRows(b, c)) +
       row('Total bill', inr(c.total), 'strong') + row('Received (payments − refunds)', inr(c.received)) + row(c.outstanding < 0 ? 'Refund due to guest' : 'Outstanding balance', inr(Math.abs(c.outstanding)), 'strong') +
@@ -974,7 +1150,7 @@
             }
             b.status = st; b.updatedAt = nowISO();
             if (st === 'Checked In') b.checkedInAt = nowISO();
-            if (st === 'Checked Out') { b.checkedOutAt = nowISO(); b.checkedOutOn = today(); S().rooms.forEach(function (x) { if (A.roomIds(b).indexOf(x.id) >= 0) x.clean = false; }); }
+            if (st === 'Checked Out') { b.checkedOutAt = nowISO(); b.checkedOutOn = today(); S().rooms.forEach(function (x) { if (A.blockedIds(A.roomIds(b), S()).indexOf(x.id) >= 0 || A.roomIds(b).indexOf(x.id) >= 0) setHk(x, 'dirty'); }); }
             save().then(function () { toast(st === 'Checked Out' ? 'Checked out — room marked for cleaning' : 'Status: ' + st); render(); });
           };
         });
@@ -1048,10 +1224,10 @@
         var fc = g.nationality === 'Foreign' ? (g.formCArrival ? (g.formCDeparture || b.status !== 'Checked Out' ? '<span class="flag fl-overpaid">Form C arrival ✓</span>' : '<span class="flag fl-overdue">Form C departure due</span>') + (g.formCDeparture ? '<span class="flag fl-overpaid">Departure ✓</span>' : '')
           : (b.checkIn <= t && A.isActive(b) ? '<span class="flag fl-overdue">Form C due</span>' : '<span class="flag fl-pending">Form C on arrival</span>')) : '';
         return '<a class="guestrow" href="#/gx/' + b.id + '/' + g.id + '"><div><b>' + esc(g.name || 'Unnamed guest') + '</b>' + (g.primary ? ' <span class="tag2">main</span>' : '') + (g.type === 'Child' ? ' <span class="tag2">child</span>' : '') +
-          '<br><small>' + esc(g.nationality === 'Foreign' ? (g.country || 'Foreign') + ' · Passport ' + (g.passportNo || '—') : (g.idType || 'ID') + ' ' + (g.idNumber || '— not entered')) + '</small>' +
+          '<br><small>' + esc(g.nationality === 'Foreign' ? (g.country || 'Foreign') + ' · Passport ' + (maskVal(g.passportNo) || '—') : (g.idType || 'ID') + ' ' + (maskVal(g.idNumber) || '— not entered')) + '</small>' +
           '<br><small>' + docs.length + ' document' + (docs.length === 1 ? '' : 's') + (docs.length ? ' · ' + up + ' in Drive' : '') + '</small>' + (fc ? '<br>' + fc : '') + '</div><span class="chev">›</span></a>';
       }).join('') +
-      '<div class="actions" style="margin-top:10px"><a class="btn" href="#/gx/' + b.id + '/new">＋ Add guest</a>' +
+      '<div class="actions" style="margin-top:10px"><a class="btn" href="#/gx/' + b.id + '/new">' + icon('plus') + 'Add guest</a>' +
       (A.isForeignBooking(b) ? '<a class="btn" href="#/formc/' + b.id + '">Form C helper</a>' : '') + '</div></div>';
   }
   function findGuest(b, gid) { return A.guestsOf(b).filter(function (g) { return g.id === gid; })[0]; }
@@ -1077,12 +1253,12 @@
       inp('name', 'Full name (as on ID)', '', g.primary ? 'Changes here also update the booking.' : '', ' autocomplete="off"') +
       '<div class="three">' + field('Adult / child', '<select name="type">' + options(['Adult', 'Child'], g.type) + '</select>') + field('Gender', '<select name="gender">' + options(['', 'Male', 'Female', 'Other'], g.gender || '', function (x) { return x || 'Choose'; }) + '</select>') + inp('dob', 'Date of birth', 'date') + '</div>' +
       '<div class="two">' + field('Nationality', '<select name="nationality">' + options(['Indian', 'Foreign'], g.nationality) + '</select>') + inp('phone', 'Mobile', 'tel') + '</div>' +
-      '<div class="fld"><span>Other contact numbers</span><div id="xph"></div><button type="button" class="btn sm" id="addph">＋ Add number</button></div>' +
-      '<div id="indBox" class="' + (F ? 'hide' : '') + '"><div class="two">' + field('ID type', '<select name="idType">' + options(s.idTypes, g.idType) + '</select>') + inp('idNumber', 'ID number (full)', '', '', ' autocomplete="off" autocapitalize="characters"') + '</div>' +
+      '<div class="fld"><span>Other contact numbers</span><div id="xph"></div><button type="button" class="btn sm" id="addph">' + icon('plus') + 'Add number</button></div>' +
+      '<div id="indBox" class="' + (F ? 'hide' : '') + '"><div class="two">' + field('ID type', '<select name="idType">' + options(s.idTypes, g.idType) + '</select>') + field('ID number', secretInput('idNumber', g.idNumber, ' autocapitalize="characters"'), '', 'Shown as the last 4 only.') + '</div>' +
       inp('address', 'Address / city, state') + '</div>' +
       '<div id="forBox" class="' + (F ? '' : 'hide') + '"><h3 style="margin-top:6px">Passport & visa (for Form C)</h3>' +
       '<div class="two">' + inp('surname', 'Surname') + inp('givenName', 'Given name(s)') + '</div>' +
-      '<div class="two">' + inp('country', 'Nationality (country)') + inp('passportNo', 'Passport number', '', '', ' autocapitalize="characters"') + '</div>' +
+      '<div class="two">' + inp('country', 'Nationality (country)') + field('Passport number', secretInput('passportNo', g.passportNo, ' autocapitalize="characters"')) + '</div>' +
       '<div class="three">' + inp('passportPlace', 'Passport place of issue') + inp('passportIssue', 'Issued', 'date') + inp('passportExpiry', 'Expires', 'date') + '</div>' +
       '<div class="two">' + inp('visaNo', 'Visa / e-Visa number', '', '', ' autocapitalize="characters"') + field('Visa type', '<select name="visaType">' + options(['', 'e-Tourist Visa', 'Tourist Visa', 'e-Business Visa', 'Business Visa', 'Employment Visa', 'Student Visa', 'Conference Visa', 'Medical Visa', 'OCI card', 'Other'], g.visaType || '', function (x) { return x || '—'; }) + '</select>') + '</div>' +
       '<div class="three">' + inp('visaSubtype', 'Visa subtype') + inp('visaIssue', 'Visa issued', 'date') + inp('visaExpiry', 'Visa valid till', 'date') + '</div>' +
@@ -1095,16 +1271,19 @@
       '<div id="gerr"></div><button class="btn primary big" type="submit">Save guest</button>' + (!isNew && !g.primary ? '<button class="btn danger" type="button" id="gdel">Remove guest</button>' : '') + '</form>' +
       '<div class="card"><h3>Documents</h3><p class="small">' + (F ? 'Add the passport photo page, the visa (or e-Visa PDF) and a recent photo of the guest.' : 'Add the front and back of the ID.') + ' Photos are shrunk to save space and copied to the booking’s Google Drive folder at the next sync.</p>' +
       field('This document is', '<select id="dkind">' + options(DOC_KINDS, F ? (liveDocs(g).some(function (d) { return d.kind === 'Passport'; }) ? (liveDocs(g).some(function (d) { return d.kind === 'Visa'; }) ? 'Guest photo' : 'Visa') : 'Passport') : (liveDocs(g).some(function (d) { return d.kind === 'ID front'; }) ? 'ID back' : 'ID front')) + '</select>') +
-      '<div class="actions"><label class="btn primary filebtn">📷 Take photo<input type="file" id="dcam" accept="image/*" capture="environment"></label>' +
-      '<label class="btn filebtn">⬆ Upload photo / PDF<input type="file" id="dup" accept="image/*,application/pdf" multiple></label></div>' +
+      '<div class="actions"><label class="btn primary filebtn">' + icon('camera') + 'Take photo<input type="file" id="dcam" accept="image/*" capture="environment"></label>' +
+      '<label class="btn filebtn">' + icon('upload') + 'Upload photo / PDF<input type="file" id="dup" accept="image/*,application/pdf" multiple></label></div>' +
       '<div id="docs" class="docgrid"></div></div>';
     return {
       title: isNew ? 'Add guest' : 'Guest & IDs', tab: 'bookings', back: '#/guest/' + b.id, html: html, after: function () {
         var f = $('#gf');
+        bindReveal(f, function (k) { return g[k] || ''; });
         function readG() {
+          var oldSecret = { idNumber: g.idNumber, passportNo: g.passportNo };
           ['name', 'type', 'gender', 'dob', 'nationality', 'phone', 'idType', 'idNumber', 'address', 'surname', 'givenName', 'country', 'passportNo', 'passportPlace', 'passportIssue', 'passportExpiry',
             'visaNo', 'visaType', 'visaSubtype', 'visaIssue', 'visaExpiry', 'visaPlace', 'homeAddress', 'homeCity', 'homePhone', 'arrivedFrom', 'arrivalIndia', 'arrivalTime', 'employedIndia', 'purpose', 'nextPlace', 'nextCity', 'nextState']
             .forEach(function (k) { if (f.elements[k]) g[k] = String(f.elements[k].value || '').trim(); });
+          g.idNumber = keepSecret(f, 'idNumber', oldSecret.idNumber); g.passportNo = keepSecret(f, 'passportNo', oldSecret.passportNo);
           ['idNumber', 'passportNo', 'visaNo'].forEach(function (k) { g[k] = String(g[k] || '').toUpperCase().replace(/\s+/g, k === 'idNumber' ? ' ' : ''); });
           if (g.nationality === 'Foreign' && !g.idType) g.idType = 'Passport';
           return g;
@@ -1231,6 +1410,7 @@
       ['Your property (reference in India)'], ['Name', s.businessName], ['Address', s.address], ['Phone', s.phone]
     ];
   }
+  var SECRET_ROWS = ['Passport number', 'Visa number'];
   routes.formc = function (arg) {
     var parts = arg.split('/'), b = booking(parts[0]);
     if (!b) return { title: 'Not found', html: empty('Booking not found.'), back: '#/bookings', tab: 'bookings' };
@@ -1245,7 +1425,8 @@
       '<div class="actions noprint"><a class="btn primary" href="https://indianfrro.gov.in/frro/FormC" target="_blank" rel="noopener">Open Form C portal</a><button class="btn" onclick="window.print()">Print / PDF</button><button class="btn" id="fcdocs">Share passport, visa & photo</button></div></div>' +
       '<div class="card fcard">' + rows.map(function (r, i) {
         if (r.length === 1) return '<div class="fcsec">' + esc(r[0]) + '</div>';
-        return '<div class="fcrow"><span>' + esc(r[0]) + '</span><b>' + (r[1] ? esc(r[1]) : '<em class="muted">—</em>') + '</b>' + (r[1] ? '<button class="btn sm noprint" data-copy="' + i + '">Copy</button>' : '<span></span>') + '</div>';
+        var hid = SECRET_ROWS.indexOf(r[0]) >= 0 && Date.now() >= revealUntil && r[1];
+        return '<div class="fcrow"><span>' + esc(r[0]) + '</span><b>' + (r[1] ? esc(hid ? maskVal(r[1]) : r[1]) : '<em class="muted">—</em>') + '</b>' + (r[1] ? '<button class="btn sm noprint" data-copy="' + i + '">Copy</button>' : '<span></span>') + '</div>';
       }).join('') + '</div>' +
       '<div class="card noprint"><h3>Status</h3><label class="chk"><input type="checkbox" id="fcA"' + (g.formCArrival ? ' checked' : '') + '> Arrival Form C filed' + (g.formCArrivalAt ? ' (' + fmtDate(g.formCArrivalAt.slice(0, 10)) + ')' : '') + '</label>' +
       field('Form C application / reference number', '<input id="fcRef" value="' + esc(g.formCRef || '') + '">') +
@@ -1255,6 +1436,9 @@
         $$('[data-copy]').forEach(function (x) {
           x.onclick = function () {
             var v = rows[+x.dataset.copy][1];
+            if (SECRET_ROWS.indexOf(rows[+x.dataset.copy][0]) >= 0 && Date.now() >= revealUntil) {
+              askReveal().then(function (ok) { if (ok) { render(); toast('Full numbers shown for 1 minute. Tap Copy again.'); } }); return;
+            }
             (navigator.clipboard ? navigator.clipboard.writeText(v) : Promise.reject()).then(function () { x.textContent = 'Copied'; setTimeout(function () { x.textContent = 'Copy'; }, 1200); })
               .catch(function () { prompt('Copy this:', v); });
           };
@@ -1318,7 +1502,7 @@
       var tot = A.sum(lines, function (x) { return x.amount; });
       return '<div class="card fsday" data-day="' + d + '"><div class="fsdh"><h3>' + (d > 0 ? 'Day ' + d + (A.dayDate(b, d) ? ' · ' + esc(A.fmtLong(A.dayDate(b, d))) : '') : (lines.some(function (x) { return (x.flags || []).indexOf('day') >= 0; }) ? 'Day not set' : 'Whole stay')) + '</h3><b data-dt="' + d + '">' + inr(tot) + '</b></div>' +
         (lines.length ? lines.map(lineRow).join('') : '<p class="small">Nothing yet.</p>') +
-        '<div class="actions"><button type="button" class="btn sm" data-add="' + d + '">＋ Add item</button></div></div>';
+        '<div class="actions"><button type="button" class="btn sm" data-add="' + d + '">' + icon('plus') + 'Add item</button></div></div>';
     }
     var groups = {}; for (var d = 1; d <= D; d++) groups[d] = [];
     b.charges.forEach(function (cl) { var k = num(cl.day) > 0 && num(cl.day) <= D ? Math.round(num(cl.day)) : 0; (groups[k] = groups[k] || []).push(cl); });
@@ -1331,7 +1515,7 @@
       '<div class="card"><h3>Add from a bill photo</h3><p class="small">Take a clear photo of the handwritten bill (flat, good light). It is read by Google (free, in your own Google account), matched to your menu, and added to the day. Anything not read for sure is marked in red to fix. Needs internet and Sheet sync.</p>' +
       '<div class="two">' + field('Bill is for', '<select id="scanDay"><option value="0">Read the day from the bill</option>' + Array.apply(null, Array(D)).map(function (_, i) { return '<option value="' + (i + 1) + '">Day ' + (i + 1) + (A.dayDate(b, i + 1) ? ' · ' + fmtShort(A.dayDate(b, i + 1)) : '') + '</option>'; }).join('') + '</select>') +
       field('Meal', '<select id="scanMeal"><option value="">Read from the bill</option>' + options(MEAL_OPTS, '') + '</select>') + '</div>' +
-      '<div class="actions"><label class="btn primary filebtn">📷 Photo of bill<input type="file" id="bcam" accept="image/*" capture="environment"></label><label class="btn filebtn">⬆ Upload bill photo<input type="file" id="bup" accept="image/*"></label></div><div id="scanBox"></div></div>' +
+      '<div class="actions"><label class="btn primary filebtn">' + icon('camera') + 'Photo of bill<input type="file" id="bcam" accept="image/*" capture="environment"></label><label class="btn filebtn">' + icon('upload') + 'Upload bill photo<input type="file" id="bup" accept="image/*"></label></div><div id="scanBox"></div></div>' +
       Object.keys(groups).map(Number).sort(function (x, y) { return (x || 99) - (y || 99); }).filter(function (k) { return k > 0 || groups[k].length; }).map(function (k) { return dayCard(k, groups[k]); }).join('') +
       '<div class="card"><h3>Statement for the guest</h3>' +
       field('Discount on food & services ₹', '<input id="exd" type="number" inputmode="decimal" min="0" step="any" value="' + esc(b.extrasDiscount || '') + '">', '', 'Only if the guest insists. Comes off food and services before GST, and the tax invoice shows the same.') +
@@ -1398,7 +1582,8 @@
         function scanFile(file, lang) {
           var bk = liveB();
           $('#scanBox').innerHTML = '<p class="small">Saving the photo…</p>';
-          compressImage(file).then(function (out) {
+          /* food bills are read by OCR, so they keep more detail than ID photos */
+          compressImage(file, { maxBytes: 450 * 1024, side: 2000 }).then(function (out) {
             var did = 'bill-' + uid(), rec = { id: did, kind: 'Food bill', mime: out.blob.type || 'image/jpeg', size: out.blob.size, w: out.w, h: out.h, createdAt: nowISO(), name: A.cleanName((bk.no || '') + ' food bill ' + today() + ' ' + did.slice(-4)) + '.jpg', local: true };
             return filePut(did, out.blob).then(function () { bk = liveB(); bk.billDocs = bk.billDocs || []; bk.billDocs.push(rec); bk.updatedAt = nowISO(); return save(true); }).then(function () { return readBill(did, out.blob, lang || 'hi'); });
           }).catch(function (e) { $('#scanBox').innerHTML = '<div class="warn">Could not save the photo: ' + esc(e.message || e) + '</div>'; });
@@ -1494,7 +1679,7 @@
       (q.couponCode ? '<div class="flag fl-pending">Coupon ' + esc(q.couponCode) + '</div>' : (A.couponCandidates(data, today()).some(function (x) { return x.id === q.id; }) ? '<div class="flag fl-overdue">Offer a coupon?</div>' : '')) + '</a>';
   }
   routes.queries = function () {
-    var html = '<a class="cta small" href="#/qnew">＋ Add New Query</a>' +
+    var html = '<a class="cta small" href="#/qnew">' + icon('plus') + 'Add New Query</a>' +
       '<div class="searchbar"><input id="qq" type="search" placeholder="Search name, phone, channel, date…" value="' + esc(qFilter.q) + '"></div>' +
       '<div class="chips" id="qchips">' + ['Open', 'Answered', 'Closed', 'All'].map(function (x) { return '<button class="chip' + (qFilter.status === x ? ' on' : '') + '" data-v="' + x + '">' + x + '</button>'; }).join('') + '</div><div id="qlist"></div>' +
       '<a class="card navrow" href="#/conversion"><b>Query conversion by channel</b><small>Which channels turn enquiries into bookings</small></a>';
@@ -1909,52 +2094,228 @@
   var calMonth = null;
   /* Platform blocks covering this room on this night (the 4BHK counts as all its rooms). */
   function extAt(roomId, ds) { return A.extOverlaps(data.ext, { rooms: [{ roomId: roomId }], checkIn: ds, checkOut: A.addDays(ds, 1) }, S()); }
+  /* Version 2.0: the room calendar draws each stay as one bar with the guest's name. Tap (or drag with a mouse)
+     across empty nights to start a booking for those dates. */
+  function roomsNav(on) {
+    return '<div class="seg noprint"><a href="#/calendar" class="' + (on === 'cal' ? 'on' : '') + '">' + icon('calendar') + 'Calendar</a><a href="#/housekeeping" class="' + (on === 'hk' ? 'on' : '') + '">' + icon('broom') + 'Housekeeping</a></div>';
+  }
   routes.calendar = function () {
     calMonth = calMonth || thisMonth();
     var s = S(), rooms = A.activeRooms(s), dim = A.daysInMonth(calMonth), t = today();
+    var wd = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
     var head = '<tr><th class="rn">Room</th>';
-    for (var d = 1; d <= dim; d++) { var ds = calMonth + '-' + pad(d); head += '<th class="' + (ds === t ? 'tday' : '') + '">' + d + '</th>'; }
+    for (var d = 1; d <= dim; d++) {
+      var ds = calMonth + '-' + pad(d), dow = new Date(ds + 'T00:00:00').getDay();
+      head += '<th class="' + (ds === t ? 'tday' : '') + (dow === 0 || dow === 6 ? ' wkend' : '') + '"><small>' + wd[dow] + '</small>' + d + '</th>';
+    }
     head += '</tr>';
+    function cellInfo(r, ds) {
+      var bk = data.bookings.filter(function (b) { return A.blockedIds(A.roomIds(b), s).indexOf(r.id) >= 0 && (A.isActive(b) || b.status === 'Enquiry') && A.isDate(b.checkIn) && b.checkIn <= ds && b.checkOut > ds; });
+      if (bk.length) {
+        var b = bk[0], xclash = A.isActive(b) && extAt(r.id, ds).some(function (x) { return !A.isOwnEcho(x, b); });
+        /* on the whole-house row (4BHK), two of its rooms booked by different guests is not a clash; it is one only when the 4BHK itself is booked too */
+        var virt = (r.includes || []).length > 0, direct = bk.filter(function (x) { return A.roomIds(x).indexOf(r.id) >= 0; }).length;
+        return { key: 'b:' + b.id, b: b, clash: (bk.length > 1 && (!virt || direct > 0)) || xclash };
+      }
+      var xs = extAt(r.id, ds);
+      if (xs.length) return { key: 'x:' + xs[0].p + ':' + xs[0].s, x: xs[0] };
+      return { key: '', free: true };
+    }
     var body = rooms.map(function (r) {
-      var cells = '<td class="rn">' + esc(r.name) + '</td>';
-      for (var d = 1; d <= dim; d++) {
-        var ds = calMonth + '-' + pad(d);
-        var bk = data.bookings.filter(function (b) { return A.blockedIds(A.roomIds(b), s).indexOf(r.id) >= 0 && (A.isActive(b) || b.status === 'Enquiry') && A.isDate(b.checkIn) && b.checkIn <= ds && b.checkOut > ds; });
-        if (bk.length) {
-          var b = bk[0], startHere = b.checkIn === ds || d === 1;
-          var xclash = A.isActive(b) && extAt(r.id, ds).some(function (x) { return !A.isOwnEcho(x, b); });
-          cells += '<td class="occ ' + (bk.length > 1 || xclash ? 'clash' : statusClass(b.status)) + '"><a href="#/guest/' + b.id + '" title="' + esc(gname(b)) + '">' + (startHere ? esc((A.roomIds(b).indexOf(r.id) < 0 ? '↳' : '') + gname(b).split(' ')[0].slice(0, 6)) : '') + '</a></td>';
-        } else if (extAt(r.id, ds).length) {
-          var xb = extAt(r.id, ds)[0];
-          cells += '<td class="occ ext"><a href="#/otacal" title="Blocked on ' + esc(A.otaName(xb.p)) + '">' + (xb.s === ds || d === 1 ? esc(A.otaName(xb.p).charAt(0)) : '') + '</a></td>';
-        } else cells += '<td class="free"><a href="#/new/roomId=' + encodeURIComponent(r.id) + '&checkIn=' + ds + '" aria-label="Book ' + esc(r.name) + ' on ' + ds + '"></a></td>';
+      var cells = '<td class="rn" title="' + esc(r.name) + '">' + esc(r.name) + '</td>', d = 1;
+      while (d <= dim) {
+        var ds = calMonth + '-' + pad(d), ci = cellInfo(r, ds);
+        if (ci.free) { cells += '<td class="free' + (ds < t ? ' past' : '') + '" data-room="' + esc(r.id) + '" data-date="' + ds + '"></td>'; d++; continue; }
+        var run = 1, clash = !!ci.clash;
+        while (d + run <= dim) { var nx = cellInfo(r, calMonth + '-' + pad(d + run)); if (nx.key !== ci.key) break; clash = clash || !!nx.clash; run++; }
+        if (ci.b) {
+          var b = ci.b, via = A.roomIds(b).indexOf(r.id) < 0, cont = b.checkIn < ds, more = b.checkOut > A.addDays(calMonth + '-' + pad(dim), 1);
+          cells += '<td class="bk" colspan="' + run + '"><a class="cbar ' + (clash ? 'clash' : statusClass(b.status)) + (cont ? ' cont' : '') + (more ? ' more' : '') + (via ? ' via' : '') + '" href="#/guest/' + b.id + '" title="' + esc(gname(b) + ' · ' + roomsLabel(b) + ' · ' + fmtShort(b.checkIn) + ' → ' + fmtShort(b.checkOut)) + '">' +
+            (clash ? icon('alert') : '') + '<span>' + esc((via ? '↳ ' : '') + (run > 1 ? gname(b) : gname(b).split(' ')[0])) + '</span></a></td>';
+        } else {
+          cells += '<td class="bk" colspan="' + run + '"><a class="cbar ext" href="#/otacal" title="Blocked on ' + esc(A.otaName(ci.x.p)) + '"><span>' + esc(run > 2 ? A.otaName(ci.x.p) : A.otaName(ci.x.p).charAt(0)) + '</span></a></td>';
+        }
+        d += run;
       }
       return '<tr>' + cells + '</tr>';
     }).join('');
-    var html = '<div class="monthbar"><button class="btn sm" id="pm">‹</button><b>' + fmtMonth(calMonth) + '</b><button class="btn sm" id="nm">›</button></div>' +
+    var html = roomsNav('cal') + '<div class="monthbar"><button class="btn sm icon-only" id="pm" aria-label="Previous month">' + icon('chev-left') + '</button><b>' + fmtMonth(calMonth) + '</b>' +
+      '<span class="mb-r"><button class="btn sm" id="tm">Today</button><button class="btn sm icon-only" id="nm" aria-label="Next month">' + icon('chev-right') + '</button></span></div>' +
       (rooms.length ? '<div class="calwrap"><table class="cal">' + head + body + '</table></div>' : empty('Add rooms in Settings first.', '<a class="btn" href="#/settings">Settings</a>')) +
-      '<p class="small legend"><span class="lg st-confirmed"></span>Confirmed <span class="lg st-checked-in"></span>In-house <span class="lg st-checked-out"></span>Left <span class="lg st-enquiry"></span>Enquiry <span class="lg ext"></span>Blocked on Airbnb (A) / Booking.com (B) / MMT (M) <span class="lg clash"></span>Clash · Tap an empty cell to book.</p>' +
-      '<h2>Room status today</h2>' + rooms.map(function (r) {
-        var occ = data.bookings.filter(function (b) { return A.blockedIds(A.roomIds(b), s).indexOf(r.id) >= 0 && A.isActive(b) && A.isDate(b.checkIn) && b.checkIn <= t && b.checkOut > t; })[0];
-        return '<div class="card roomrow"><div><b>' + esc(r.name) + '</b><br><small>' + (occ ? 'Occupied · ' + esc(gname(occ)) + (A.roomIds(occ).indexOf(r.id) < 0 ? ' (via ' + esc(roomsLabel(occ)) + ')' : '') : 'Available tonight') + '</small></div><button class="btn sm ' + (r.clean === false ? 'danger' : '') + '" data-clean="' + r.id + '">' + (r.clean === false ? 'Needs cleaning' : 'Clean ✓') + '</button></div>';
-      }).join('');
+      '<p class="small legend"><span class="lg st-confirmed"></span>Confirmed <span class="lg st-checked-in"></span>In-house <span class="lg st-checked-out"></span>Left <span class="lg st-enquiry"></span>Enquiry <span class="lg ext"></span>Blocked on Airbnb / Booking.com / MMT <span class="lg clash"></span>Clash</p>' +
+      '<p class="small">Tap an empty night to start a booking, then tap the last night to book several nights. With a mouse, drag across the nights.</p>' +
+      '<div id="calpick" class="pickbar hide"></div>';
     return {
-      title: 'Room calendar', tab: 'calendar', html: html, after: function () {
-        var pm = $('#pm'), nm = $('#nm');
-        pm.onclick = function () { calMonth = A.prevMonth(calMonth); render(); };
-        nm.onclick = function () { var d = new Date(Date.UTC(+calMonth.slice(0, 4), +calMonth.slice(5, 7), 1)); calMonth = d.toISOString().slice(0, 7); render(); };
-        $$('[data-clean]').forEach(function (btn) { btn.onclick = function () { var r = S().rooms.filter(function (x) { return x.id === btn.dataset.clean; })[0]; r.clean = r.clean === false; save(); render(); }; });
-        var tc = $('.cal .tday'); if (tc) tc.scrollIntoView({ inline: 'center', block: 'nearest' });
+      title: 'Rooms', tab: 'calendar', html: html, after: function () {
+        $('#pm').onclick = function () { calMonth = A.prevMonth(calMonth); render(); };
+        $('#nm').onclick = function () { var d = new Date(Date.UTC(+calMonth.slice(0, 4), +calMonth.slice(5, 7), 1)); calMonth = d.toISOString().slice(0, 7); render(); };
+        $('#tm').onclick = function () { calMonth = thisMonth(); render(); };
+        var tc = $('.cal .tday'), wrap = $('.calwrap');
+        if (tc && wrap) {
+          tc.scrollIntoView({ inline: 'center', block: 'nearest' });
+          var ln = document.createElement('div'); ln.className = 'todayline'; ln.style.left = (tc.offsetLeft + tc.offsetWidth / 2) + 'px'; ln.style.height = $('.cal').offsetHeight + 'px';
+          wrap.appendChild(ln);
+        }
+        /* pick nights: tap start then end (touch), or drag (mouse) */
+        var pick = null, bar = $('#calpick');
+        function cellsBetween(room, a, z) { return $$('.cal td.free[data-room="' + room + '"]').filter(function (c) { return c.dataset.date >= a && c.dataset.date <= z; }); }
+        function contiguous(room, a, z) { var n = A.nights(a, A.addDays(z, 1)); return cellsBetween(room, a, z).length === n; }
+        function paint() {
+          $$('.cal td.sel').forEach(function (c) { c.classList.remove('sel'); });
+          if (!pick) { bar.classList.add('hide'); return; }
+          cellsBetween(pick.room, pick.a, pick.z).forEach(function (c) { c.classList.add('sel'); });
+          var n = A.nights(pick.a, A.addDays(pick.z, 1));
+          bar.innerHTML = '<div><b>' + esc(roomName(pick.room)) + '</b><small>' + fmtShort(pick.a) + ' → ' + fmtShort(A.addDays(pick.z, 1)) + ' · ' + n + ' night' + (n > 1 ? 's' : '') + '</small></div>' +
+            '<button class="btn primary sm" id="pkgo">Book</button><button class="btn sm" id="pkx" aria-label="Cancel">' + icon('x') + '</button>';
+          bar.classList.remove('hide');
+          $('#pkgo').onclick = function () { go('#/new/roomId=' + encodeURIComponent(pick.room) + '&checkIn=' + pick.a + '&checkOut=' + A.addDays(pick.z, 1)); };
+          $('#pkx').onclick = function () { pick = null; paint(); };
+        }
+        var drag = null, skipClick = false;
+        function tap(c) {
+          if (pick && pick.room === c.dataset.room && !pick.done && c.dataset.date > pick.a && contiguous(pick.room, pick.a, c.dataset.date)) { pick.z = c.dataset.date; pick.done = true; }
+          else pick = { room: c.dataset.room, a: c.dataset.date, z: c.dataset.date };
+          paint();
+        }
+        $$('.cal td.free').forEach(function (c) {
+          c.addEventListener('pointerdown', function (e) { if (e.pointerType === 'mouse') { e.preventDefault(); drag = { room: c.dataset.room, anchor: c.dataset.date, moved: false }; } });
+          c.addEventListener('pointerenter', function () {
+            if (!drag || c.dataset.room !== drag.room || c.dataset.date === drag.anchor && !drag.moved) return;
+            var lo = c.dataset.date < drag.anchor ? c.dataset.date : drag.anchor, hi = c.dataset.date < drag.anchor ? drag.anchor : c.dataset.date;
+            if (contiguous(drag.room, lo, hi)) { drag.moved = true; pick = { room: drag.room, a: lo, z: hi, done: true }; paint(); }
+          });
+          c.addEventListener('click', function () { if (skipClick) { skipClick = false; return; } tap(c); });
+        });
+        var onUp = function () { if (drag && drag.moved) skipClick = true; drag = null; };
+        document.addEventListener('pointerup', onUp);
+        window.addEventListener('hashchange', function rm() { document.removeEventListener('pointerup', onUp); window.removeEventListener('hashchange', rm); });
+      }
+    };
+  };
+
+  /* ---------- Version 2.0: HOUSEKEEPING board ----------
+     Each room is Dirty, Cleaning or Ready. The status lives on the room in Settings (the old "clean" switch stays in
+     step, so the Sheet and older app versions still understand it). Check-out marks the rooms Dirty. */
+  var HK = { dirty: 'Dirty', cleaning: 'Cleaning', ready: 'Ready' };
+  function hkOf(r) { if (r.clean !== false) return 'ready'; return r.hk === 'cleaning' ? 'cleaning' : 'dirty'; }
+  function setHk(r, st) { r.hk = st; r.clean = st === 'ready'; r.hkAt = nowISO(); }
+  function physicalRooms() { return A.activeRooms(S()).filter(function (r) { return !(r.includes || []).length; }); }
+  function roomToday(r, t) {
+    var s = S(), on = function (b) { return A.blockedIds(A.roomIds(b), s).indexOf(r.id) >= 0 && A.isActive(b) && A.isDate(b.checkIn); };
+    var stay = data.bookings.filter(function (b) { return on(b) && b.checkIn <= t && b.checkOut > t; })[0];
+    var arr = data.bookings.filter(function (b) { return on(b) && b.checkIn === t && b.status !== 'Checked In'; })[0];
+    var dep = data.bookings.filter(function (b) { return on(b) && b.checkOut === t && b.status !== 'Checked Out'; })[0];
+    return { stay: stay, arr: arr, dep: dep };
+  }
+  routes.housekeeping = function () {
+    var t = today(), rooms = physicalRooms();
+    var list = rooms.map(function (r) { var x = roomToday(r, t); x.r = r; x.st = hkOf(r); x.urgent = !!(x.arr && x.st !== 'ready'); return x; })
+      .sort(function (a, b) { return (b.urgent - a.urgent) || ({ dirty: 0, cleaning: 1, ready: 2 }[a.st] - { dirty: 0, cleaning: 1, ready: 2 }[b.st]); });
+    var cnt = { dirty: 0, cleaning: 0, ready: 0 }; list.forEach(function (x) { cnt[x.st]++; });
+    var html = roomsNav('hk') +
+      '<div class="hkstats"><div class="hks dirty"><b>' + cnt.dirty + '</b><span>Dirty</span></div><div class="hks cleaning"><b>' + cnt.cleaning + '</b><span>Cleaning</span></div><div class="hks ready"><b>' + cnt.ready + '</b><span>Ready</span></div></div>' +
+      (list.length ? '<div class="hkgrid">' + list.map(function (x) {
+        var r = x.r, who = x.stay ? 'In-house · ' + esc(gname(x.stay)) + (x.stay.checkOut === A.addDays(t, 1) ? ' · leaves tomorrow' : '') : x.dep ? 'Checking out today · ' + esc(gname(x.dep)) : 'Vacant';
+        if (x.arr) who = (x.stay ? who + '<br>' : '') + '<b class="arr">Arriving today · ' + esc(gname(x.arr)) + '</b>';
+        return '<div class="card hk hk-' + x.st + (x.urgent ? ' urgent' : '') + '"><div class="hk-top"><b>' + esc(r.name) + '</b><span class="hkchip ' + x.st + '">' + HK[x.st] + '</span></div>' +
+          '<div class="hk-who">' + who + '</div>' + (x.urgent ? '<div class="hk-warn">' + icon('alert') + 'Guest arriving — room not ready</div>' : '') +
+          (r.hkAt ? '<div class="hk-at">Updated ' + new Date(r.hkAt).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) + '</div>' : '') +
+          '<div class="hkbtns">' + ['dirty', 'cleaning', 'ready'].map(function (k) { return '<button class="' + (x.st === k ? 'on ' + k : '') + '" data-hk="' + esc(r.id) + '" data-st="' + k + '">' + HK[k] + '</button>'; }).join('') + '</div></div>';
+      }).join('') + '</div>' : empty('Add rooms in Settings first.', '<a class="btn" href="#/settings">Settings</a>')) +
+      '<p class="small">Check-out marks a room Dirty by itself. Whole-house bookings (4BHK) show on each of its rooms. Status syncs with your other devices through Settings.</p>';
+    return {
+      title: 'Housekeeping', tab: 'calendar', html: html, after: function () {
+        $$('[data-hk]').forEach(function (btn) {
+          btn.onclick = function () {
+            var r = S().rooms.filter(function (x) { return x.id === btn.dataset.hk; })[0]; if (!r) return;
+            setHk(r, btn.dataset.st); save(); haptic(); render();
+          };
+        });
+      }
+    };
+  };
+
+  /* ---------- Version 2.0: DAILY CASH CLOSE ----------
+     What the app recorded for a day (by payment method) against what was actually counted. Kept in Settings
+     (last 120 days), so it reaches the other device and the Sheet with the next sync. Opening cash = the cash counted
+     at the previous close. */
+  function closes() { var s = S(); s.cashCloses = s.cashCloses || []; return s.cashCloses; }
+  function closeOf(ds) { return closes().filter(function (c) { return c.date === ds; })[0]; }
+  function prevClose(ds) { return closes().filter(function (c) { return c.date < ds; }).sort(function (a, b) { return a.date < b.date ? 1 : -1; })[0]; }
+  function dayCash(ds) {
+    var col = A.dailyReport(data, ds).collections, m = col.byMethod;
+    var exp = (data.expenses || []).filter(function (e) { return e.date === ds; });
+    var cashExp = A.sum(exp.filter(function (e) { return e.method === 'Cash'; }), function (e) { return e.amount; });
+    var pc = prevClose(ds), opening = pc ? num(pc.cashCounted) : 0;
+    var out = { col: col, cash: num(m.Cash), upi: num(m.UPI), card: num(m.Card), bank: num(m['Bank Transfer']), cashExp: r2(cashExp), opening: opening, prev: pc };
+    return out;
+  }
+  routes.cashclose = function (arg) {
+    var ds = A.isDate(arg) ? arg : today(), x = dayCash(ds), c = closeOf(ds) || {};
+    var outV = num(c.cashOut), expected = r2(x.opening + x.cash - x.cashExp - outV);
+    function diffHtml(d) { d = r2(d); return Math.abs(d) < 0.5 ? '<span class="chg good">Matches</span>' : '<span class="chg bad">' + (d > 0 ? 'Extra ' : 'Short ') + inr(Math.abs(d)) + '</span>'; }
+    var hist = closes().slice().sort(function (a, b) { return a.date < b.date ? 1 : -1; }).slice(0, 14);
+    var html = '<form id="ccf" novalidate>' +
+      '<div class="monthbar"><a class="btn sm icon-only" href="#/cashclose/' + A.addDays(ds, -1) + '" aria-label="Previous day">' + icon('chev-left') + '</a><b>' + fmtDate(ds) + '</b>' +
+      '<span class="mb-r">' + (ds !== today() ? '<a class="btn sm" href="#/cashclose/' + today() + '">Today</a>' : '') + (ds < today() ? '<a class="btn sm icon-only" href="#/cashclose/' + A.addDays(ds, 1) + '" aria-label="Next day">' + icon('chev-right') + '</a>' : '') + '</span></div>' +
+      (c.at ? '<div class="ok">' + icon('check') + 'Closed ' + new Date(c.at).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) + '. You can correct and save again.</div>' : '') +
+      '<div class="card"><h3>' + icon('wallet') + 'Recorded in the app</h3>' +
+      row('Cash received', inr(x.cash)) + row('UPI received', inr(x.upi)) + row('Card', inr(x.card)) + row('Bank transfer', inr(x.bank)) +
+      row('Cash expenses paid', '− ' + inr(x.cashExp), 'muted') + row('Total collected (net of refunds)', inr(x.col.net), 'strong') +
+      '<p class="small">' + x.col.count + ' payment' + (x.col.count === 1 ? '' : 's') + ' on this date. <a href="#/daily">Daily summary ›</a> · <a href="#/expenses">Expenses ›</a></p></div>' +
+      '<div class="card"><h3>' + icon('cash') + 'Cash in hand</h3>' +
+      row('Opening cash', inr(x.opening), x.prev ? '' : 'muted') + '<p class="small">' + (x.prev ? 'Counted at the close of ' + fmtDate(x.prev.date) + '.' : 'No earlier close: opening is ₹0. Enter today’s count to start.') + '</p>' +
+      '<div class="two">' + field('Cash taken out / deposited', '<input name="cashOut" type="number" inputmode="decimal" min="0" step="any" value="' + esc(c.cashOut || '') + '">', '', 'To the bank or the owner.') +
+      field('Cash counted now', '<input name="cashCounted" type="number" inputmode="decimal" min="0" step="any" value="' + esc(c.cashCounted == null ? '' : c.cashCounted) + '">') + '</div>' +
+      '<div class="ccres" id="ccCash"></div></div>' +
+      '<div class="card"><h3>' + icon('phone') + 'UPI & bank</h3>' +
+      '<div class="two">' + field('UPI as per UPI app', '<input name="upiSeen" type="number" inputmode="decimal" min="0" step="any" value="' + esc(c.upiSeen == null ? '' : c.upiSeen) + '">', '', 'Today’s total in PhonePe / GPay / bank app.') +
+      field('Bank credits seen', '<input name="bankSeen" type="number" inputmode="decimal" min="0" step="any" value="' + esc(c.bankSeen == null ? '' : c.bankSeen) + '">', '', 'Card + bank transfers.') + '</div>' +
+      '<div class="ccres" id="ccUpi"></div></div>' +
+      '<div class="card">' + field('Note', '<input name="note" value="' + esc(c.note || '') + '" placeholder="e.g. ₹200 given to staff for gas">') + '</div>' +
+      '<button class="btn primary big" type="submit">' + icon('check') + (c.at ? 'Save corrected close' : 'Close the day') + '</button></form>' +
+      '<h2>Recent closes</h2>' + (hist.length ? '<div class="card"><table class="tbl"><tr><th>Date</th><th>Cash</th><th>UPI</th><th>Bank</th></tr>' + hist.map(function (h) {
+        function dd(v) { v = num(v); return Math.abs(v) < 0.5 ? '<span class="okc">✓</span>' : '<span class="due">' + (v > 0 ? '+' : '−') + inr(Math.abs(v)) + '</span>'; }
+        return '<tr><td><a href="#/cashclose/' + h.date + '">' + fmtShort(h.date) + '</a></td><td>' + dd(h.cashDiff) + '</td><td>' + (h.upiSeen == null ? '—' : dd(h.upiDiff)) + '</td><td>' + (h.bankSeen == null ? '—' : dd(h.bankDiff)) + '</td></tr>';
+      }).join('') + '</table></div>' : empty('No days closed yet.'));
+    return {
+      title: 'Daily cash close', tab: 'reports', back: '#/reports', html: html, after: function () {
+        var f = $('#ccf');
+        function vals() {
+          var g = function (k) { var v = String(f.elements[k].value).trim(); return v === '' ? null : num(v); };
+          var out = num(g('cashOut')), exp = r2(x.opening + x.cash - x.cashExp - out);
+          return { cashOut: out, cashCounted: g('cashCounted'), upiSeen: g('upiSeen'), bankSeen: g('bankSeen'), expected: exp };
+        }
+        function show() {
+          var v = vals();
+          $('#ccCash').innerHTML = row('Expected cash', inr(v.expected), 'strong') + (v.cashCounted == null ? '<p class="small">Enter the cash counted to compare.</p>' : '<div class="row"><span>Difference</span><b>' + diffHtml(v.cashCounted - v.expected) + '</b></div>');
+          $('#ccUpi').innerHTML = (v.upiSeen == null ? '' : '<div class="row"><span>UPI difference</span><b>' + diffHtml(v.upiSeen - x.upi) + '</b></div>') +
+            (v.bankSeen == null ? '' : '<div class="row"><span>Bank difference</span><b>' + diffHtml(v.bankSeen - x.card - x.bank) + '</b></div>');
+        }
+        f.oninput = show; show();
+        f.onsubmit = function (e) {
+          e.preventDefault();
+          var v = vals();
+          if (v.cashCounted == null) { toast('Enter the cash counted first.', true); f.elements.cashCounted.focus(); return; }
+          var list = closes().filter(function (c2) { return c2.date !== ds; });
+          list.push({ date: ds, cashIn: x.cash, cashExp: x.cashExp, opening: x.opening, cashOut: v.cashOut, cashCounted: v.cashCounted, cashDiff: r2(v.cashCounted - v.expected),
+            upi: x.upi, upiSeen: v.upiSeen, upiDiff: v.upiSeen == null ? null : r2(v.upiSeen - x.upi), bank: r2(x.card + x.bank), bankSeen: v.bankSeen, bankDiff: v.bankSeen == null ? null : r2(v.bankSeen - x.card - x.bank),
+            note: f.elements.note.value.trim(), at: nowISO() });
+          list.sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+          S().cashCloses = list.slice(-120);
+          save(); haptic(); toast('Day closed'); render();
+        };
       }
     };
   };
 
   /* ---------- REPORTS hub ---------- */
   routes.reports = function () {
-    var items = [['analytics', 'Analytics & export', 'Compare periods and channels · Excel and PDF with charts'], ['daily', 'Daily summary', 'Check-ins, revenue, collections for any date'], ['monthly', 'Monthly summary', 'Revenue, occupancy, platforms, rooms, profit'],
+    var items = [['cashclose', 'Daily cash close', 'Cash, UPI and bank recorded vs counted'], ['analytics', 'Analytics & export', 'Compare periods and channels · Excel and PDF with charts'], ['daily', 'Daily summary', 'Check-ins, revenue, collections for any date'], ['monthly', 'Monthly summary', 'Revenue, occupancy, platforms, rooms, profit'],
       ['platform', 'Platform revenue', 'Bookings, commission and net by platform'], ['gst', 'GST summary', 'Taxable value and GST by rate for your CA'],
       ['conversion', 'Query conversion', 'Queries vs bookings by channel'], ['payouts', 'OTA payouts', 'Match what platforms paid you'], ['expenses', 'Expenses', 'Groceries, staff, bills and more'], ['pending', 'Pending payments', 'Who owes what']];
-    return { title: 'Reports', tab: 'reports', html: items.map(function (i) { return '<a class="card navrow" href="#/' + i[0] + '"><b>' + i[1] + '</b><small>' + i[2] + '</small></a>'; }).join('') };
+    var ic = { cashclose: 'wallet', analytics: 'chart', daily: 'calendar', monthly: 'calendar', platform: 'globe', gst: 'receipt', conversion: 'funnel', payouts: 'bank', expenses: 'cart', pending: 'rupee' };
+    return { title: 'Reports', tab: 'reports', html: '<div class="card list">' + items.map(function (i) { return '<a class="li two-line" href="#/' + i[0] + '">' + icon(ic[i[0]] || 'chart') + '<span><b>' + i[1] + '</b><small>' + i[2] + '</small></span>' + icon('chev-right', 'end') + '</a>'; }).join('') + '</div>' };
   };
   function exportBar(id) { return '<div class="actions noprint"><button class="btn" id="' + id + 'csv">Export CSV</button><button class="btn" onclick="window.print()">Print / Save PDF</button></div>'; }
 
@@ -2198,9 +2559,13 @@
 
   /* ---------- MORE ---------- */
   routes.more = function () {
-    var items = [['today', 'Today’s arrivals & departures'], ['future', 'Future bookings'], ['pending', 'Pending payments'], ['reminders', 'Notifications & reminders'], ['otacal', 'Airbnb, Booking.com & MMT calendars'],
-      ['backup', 'Backup & restore'], ['importbk', 'Import old bookings'], ['import', 'Import old queries'], ['settings', 'Settings'], ['about', 'Where my data is stored']];
-    return { title: 'More', tab: 'more', html: items.map(function (i) { return '<a class="card navrow" href="#/' + i[0] + '"><b>' + i[1] + '</b></a>'; }).join('') + '<p class="small center">Version ' + APP_VERSION + '</p>' };
+    var groups = [
+      ['Daily work', [['today', 'Today’s arrivals & departures', 'login'], ['housekeeping', 'Housekeeping board', 'broom'], ['cashclose', 'Daily cash close', 'wallet'], ['future', 'Future bookings', 'calendar'], ['pending', 'Pending payments', 'rupee']]],
+      ['Connections', [['reminders', 'Notifications & reminders', 'bell'], ['otacal', 'Airbnb, Booking.com & MMT calendars', 'link']]],
+      ['Data & setup', [['backup', 'Backup & restore', 'shield'], ['importbk', 'Import old bookings', 'upload'], ['import', 'Import old queries', 'upload'], ['settings', 'Settings', 'settings'], ['about', 'Where my data is stored', 'info']]]];
+    return { title: 'More', tab: 'more', html: groups.map(function (g) {
+      return '<h2>' + g[0] + '</h2><div class="card list">' + g[1].map(function (i) { return '<a class="li" href="#/' + i[0] + '">' + icon(i[2]) + '<span>' + i[1] + '</span>' + icon('chev-right', 'end') + '</a>'; }).join('') + '</div>';
+    }).join('') + '<p class="small center">Version ' + APP_VERSION + '</p>' };
   };
 
   /* ---------- PLATFORM CALENDARS (iCal) ---------- */
@@ -2364,7 +2729,7 @@
             'Room charges', 'Food', 'Additional', 'Discount', 'Coupon code', 'Coupon', 'Cancellation fee', 'Taxable', 'GST', 'Total bill', 'Commission', 'Net after commission', 'Received', 'Outstanding', 'Payout received', 'Created', 'Special requests', 'Notes']];
           data.bookings.forEach(function (b) {
             var c = calc(b);
-            rows.push([b.no || '', b.id, b.guestName, b.phone, b.email, b.queryId ? 'Yes' : 'No', b.nationality, b.country, b.formCFiled ? 'Yes' : 'No', b.idType, b.idValue, b.adults, b.children, roomsLabel(b), b.checkIn, b.checkOut, c.nights, b.source, b.status,
+            rows.push([b.no || '', b.id, b.guestName, b.phone, b.email, b.queryId ? 'Yes' : 'No', b.nationality, b.country, b.formCFiled ? 'Yes' : 'No', b.idType, maskVal(b.idValue), b.adults, b.children, roomsLabel(b), b.checkIn, b.checkOut, c.nights, b.source, b.status,
               c.room, c.food, c.additional, c.discount, b.couponCode || '', c.coupon, c.cancelFee, c.taxable, c.gst, c.total, c.commission, c.net, c.received, c.outstanding, b.payoutReceived, (b.createdAt || '').slice(0, 10), b.specialRequests, b.notes]);
           });
           deliverFile('athulyam-bookings-' + today() + '.csv', csv(rows), 'text/csv');
@@ -2381,7 +2746,7 @@
         };
         $('#cgu').onclick = function () {
           var rows = [['Booking no', 'Check-in', 'Check-out', 'Rooms', 'Guest', 'Main guest', 'Adult/child', 'Gender', 'Date of birth', 'Nationality', 'Country', 'Mobile', 'ID type', 'ID number', 'Passport no', 'Passport expiry', 'Visa no', 'Visa type', 'Visa valid till', 'Form C arrival', 'Form C departure', 'Documents', 'In Drive']];
-          data.bookings.forEach(function (b) { A.guestsOf(b).forEach(function (g) { var dd = liveDocs(g); rows.push([b.no || '', b.checkIn, b.checkOut, roomsLabel(b), g.name, g.primary ? 'Yes' : '', g.type || 'Adult', g.gender || '', g.dob || '', g.nationality, g.country || '', g.phone || '', g.idType || '', g.idNumber || '', g.passportNo || '', g.passportExpiry || '', g.visaNo || '', g.visaType || '', g.visaExpiry || '', g.nationality === 'Foreign' ? (g.formCArrival ? 'Filed' : 'Not filed') : '', g.nationality === 'Foreign' ? (g.formCDeparture ? 'Filed' : 'Not filed') : '', dd.length, dd.filter(function (d) { return d.driveId; }).length]); }); });
+          data.bookings.forEach(function (b) { A.guestsOf(b).forEach(function (g) { var dd = liveDocs(g); rows.push([b.no || '', b.checkIn, b.checkOut, roomsLabel(b), g.name, g.primary ? 'Yes' : '', g.type || 'Adult', g.gender || '', g.dob || '', g.nationality, g.country || '', g.phone || '', g.idType || '', maskVal(g.idNumber), maskVal(g.passportNo), g.passportExpiry || '', maskVal(g.visaNo), g.visaType || '', g.visaExpiry || '', g.nationality === 'Foreign' ? (g.formCArrival ? 'Filed' : 'Not filed') : '', g.nationality === 'Foreign' ? (g.formCDeparture ? 'Filed' : 'Not filed') : '', dd.length, dd.filter(function (d) { return d.driveId; }).length]); }); });
           deliverFile('athulyam-guests-' + today() + '.csv', csv(rows), 'text/csv');
         };
         $('#cq').onclick = function () {
@@ -2428,21 +2793,21 @@
         return '<div class="roomedit"><input data-r="' + i + '" data-k="name" value="' + esc(r.name) + '" aria-label="Room name"><input data-r="' + i + '" data-k="tariff" type="number" inputmode="decimal" value="' + esc(r.tariff) + '" aria-label="Tariff per night"><label class="chk sm"><input type="checkbox" data-r="' + i + '" data-k="active"' + (r.active !== false ? ' checked' : '') + '> Active</label></div>' +
           (others.length ? '<details class="fld incl"><summary>' + (inc.length ? 'Includes: ' + esc(inc.map(roomName).join(', ')) : 'Is this unit made of other rooms?') + '</summary><p class="small">Tick the rooms that are part of ' + esc(r.name) + '. Booking it then also blocks them (and booking one of them blocks ' + esc(r.name) + ') in the calendar and the double-booking check.</p>' +
             others.map(function (o) { return '<label class="chk sm"><input type="checkbox" data-inc="' + i + '" value="' + esc(o.id) + '"' + (inc.indexOf(o.id) >= 0 ? ' checked' : '') + '> ' + esc(o.name) + '</label>'; }).join('') + '</details>' : '');
-      }).join('') + '</div><button type="button" class="btn sm" id="addroom">＋ Add room</button><p class="small">Tariff is per night. New bookings fill room charges as tariff × nights (season rates where set); you can change the amount on each booking. Untick Active to hide a room without losing its history.</p></div>' +
+      }).join('') + '</div><button type="button" class="btn sm" id="addroom">' + icon('plus') + 'Add room</button><p class="small">Tariff is per night. New bookings fill room charges as tariff × nights (season rates where set); you can change the amount on each booking. Untick Active to hide a room without losing its history.</p></div>' +
       '<div class="card"><h3>Food menu</h3><p class="small">Used to read bill photos and to add items by hand. Leave the price empty for MRP items (price entered on each bill). “kg” items take quantities like 1.5.</p><div id="menuEd">' + (function () {
         var cats = [], by = {}; (s.menu || []).forEach(function (m, i) { if (!by[m.cat]) { by[m.cat] = []; cats.push(m.cat); } by[m.cat].push([m, i]); });
         return cats.map(function (cname) { return '<details class="fld"><summary>' + esc(cname) + ' (' + by[cname].length + ')</summary>' + by[cname].map(function (x) { var m = x[0], i = x[1]; return '<div class="roomedit menuline"><input data-mi="' + i + '" data-k="name" value="' + esc(m.name) + '" aria-label="Item"><input data-mi="' + i + '" data-k="price" type="number" inputmode="decimal" min="0" step="any" value="' + (m.price == null ? '' : esc(m.price)) + '" placeholder="MRP" aria-label="Price"><select data-mi="' + i + '" data-k="unit" aria-label="Unit">' + options([{ id: '', name: 'each' }, { id: 'kg', name: 'per kg' }], m.unit || '') + '</select><button type="button" class="x" data-rmmi="' + i + '" aria-label="Remove item">−</button></div>'; }).join('') +
-          '<button type="button" class="btn sm" data-addmi="' + esc(cname) + '">＋ Add to ' + esc(cname) + '</button></details>'; }).join('');
+          '<button type="button" class="btn sm" data-addmi="' + esc(cname) + '">' + icon('plus') + 'Add to ' + esc(cname) + '</button></details>'; }).join('');
       })() + '</div></div>' +
       '<div class="card"><h3>Meal rates (per person)</h3><div class="three">' + A.MEALS.map(function (m) { return field(m + ' ₹', '<input data-mr="' + m + '" type="number" inputmode="decimal" min="0" step="any" value="' + esc(num((s.mealRates || {})[m]) || '') + '">'); }).join('') + '</div>' +
       '<p class="small">Ticking a meal on a booking charges persons × this rate. You can change persons or the amount on each booking.</p></div>' +
       '<div class="card"><h3>Services</h3><div id="svcs">' + (s.services || []).map(function (v, i) {
         return '<div class="roomedit"><input data-sv="' + i + '" data-k="name" value="' + esc(v.name) + '" placeholder="e.g. Bonfire" aria-label="Service name"><input data-sv="' + i + '" data-k="rate" type="number" inputmode="decimal" min="0" step="any" value="' + esc(num(v.rate) || '') + '" placeholder="₹ each" aria-label="Default price"><button type="button" class="x" data-rmsv="' + i + '" aria-label="Remove service">−</button></div>';
-      }).join('') + '</div><button type="button" class="btn sm" id="addsv">＋ Add service</button><p class="small">Shown in the list when you add a service to a day of a booking (quantity × price). You can also type a one-off service there.</p></div>' +
+      }).join('') + '</div><button type="button" class="btn sm" id="addsv">' + icon('plus') + 'Add service</button><p class="small">Shown in the list when you add a service to a day of a booking (quantity × price). You can also type a one-off service there.</p></div>' +
       '<div class="card"><h3>Season rate card</h3><div id="seasons">' + s.seasons.map(function (se, i) {
         return '<div class="season"><div class="two"><input data-s="' + i + '" data-k="name" value="' + esc(se.name) + '" placeholder="Season name"><button type="button" class="btn sm danger" data-dels="' + i + '">Remove</button></div><div class="two"><input type="date" data-s="' + i + '" data-k="from" value="' + esc(se.from) + '"><input type="date" data-s="' + i + '" data-k="to" value="' + esc(se.to) + '"></div>' +
           s.rooms.filter(function (r) { return r.active !== false; }).map(function (r) { return '<label class="fld inline2"><span>' + esc(r.name) + ' ₹/night</span><input type="number" inputmode="decimal" data-s="' + i + '" data-room="' + r.id + '" value="' + esc((se.rates || {})[r.id] || '') + '"></label>'; }).join('') + '</div>';
-      }).join('') + '</div><button type="button" class="btn sm" id="addseason">＋ Add season</button><p class="small">On the booking form, room charges use the season rate for each night that falls in a season, otherwise the base tariff.</p></div>' +
+      }).join('') + '</div><button type="button" class="btn sm" id="addseason">' + icon('plus') + 'Add season</button><p class="small">On the booking form, room charges use the season rate for each night that falls in a season, otherwise the base tariff.</p></div>' +
       '<div class="card"><h3>Payments & reviews</h3><div class="two">' + field('Token amount ₹', '<input name="tokenAmount" type="number" inputmode="decimal" min="0" value="' + esc(s.tokenAmount) + '">') +
       field('Your UPI ID', '<input name="upiId" value="' + esc(s.upiId) + '" placeholder="FILL IN: name@bank">') + '</div>' +
       field('Coupon code prefix', '<input name="couponPrefix" value="' + esc(s.couponPrefix || 'ATH') + '" maxlength="8" autocapitalize="characters">', '', 'Codes look like ATH10-K7QM (10% off) or ATHR500-K7QM (₹500 off).') +
@@ -2453,13 +2818,14 @@
       '<label class="chk"><input type="checkbox" name="autoReviewEmail"' + (s.autoReviewEmail !== false ? ' checked' : '') + '> Also email the review request automatically after check-out (off by default: you send it on WhatsApp from the booking)</label></div>' +
       '<div class="card"><h3>Your own booking fields</h3><div id="cfs">' + (s.customFields || []).map(function (cf, i) {
         return '<div class="roomedit"><input data-cfi="' + i + '" data-k="label" value="' + esc(cf.label) + '" placeholder="e.g. Vehicle number"><button type="button" class="x" data-rmcf="' + i + '" aria-label="Remove field">−</button></div>';
-      }).join('') + '</div><button type="button" class="btn sm" id="addcf">＋ Add field</button><p class="small">Shown on every booking form under More details, on the guest register PDF and in the Bookings tab.</p></div>' +
+      }).join('') + '</div><button type="button" class="btn sm" id="addcf">' + icon('plus') + 'Add field</button><p class="small">Shown on every booking form under More details, on the guest register PDF and in the Bookings tab.</p></div>' +
       '<div class="card"><h3>Lists</h3>' + field('Booking sources (one per line)', '<textarea name="sources" rows="5">' + esc(s.sources.join('\n')) + '</textarea>') +
       field('Expense categories (one per line)', '<textarea name="expenseCats" rows="5">' + esc(s.expenseCats.join('\n')) + '</textarea>') + '</div>' +
       '<div class="card"><h3>Guest IDs & documents</h3><label class="chk"><input type="radio" name="idMode" value="full"' + (s.idMode === 'full' ? ' checked' : '') + '> Full ID numbers</label>' +
       '<label class="chk"><input type="radio" name="idMode" value="last4"' + (s.idMode !== 'full' ? ' checked' : '') + '> Last 4 characters only</label>' +
       '<label class="chk"><input type="checkbox" name="uploadDocs"' + (s.uploadDocs !== false ? ' checked' : '') + '> Copy ID photos and documents to Google Drive at each sync</label>' +
       field('Keep photos on this phone after check-out (days)', '<input name="keepPhotosDays" type="number" min="1" value="' + esc(s.keepPhotosDays || 30) + '">', '', 'Only removed from the phone once they are safely in Drive.') +
+      '<div class="two">' + field('Premium guest: stays', '<input name="premiumStays" type="number" min="1" value="' + esc(s.premiumStays || 3) + '">') + field('or total billed (₹)', '<input name="premiumSpend" type="number" min="0" value="' + esc(s.premiumSpend || 25000) + '">', '', 'Returning guests (same mobile) are tagged Premium at either level.') + '</div>' +
       field('Booking number prefix', '<input name="bookingPrefix" value="' + esc(s.bookingPrefix || 'ATH') + '" maxlength="6" autocapitalize="characters">', '', 'Booking numbers look like ATH-000256 and keep counting up (they never restart). Changing it affects new bookings only.') +
       '<p class="small">ID numbers, photos, passports and visas are personal data. They are kept on this phone (protected by your phone lock and the app PIN) and in your own Google Drive. Share the Drive folder with nobody else.</p></div>' +
       '<div class="card"><h3>Backups</h3>' + field('Warn me if no backup or sync for (days)', '<input name="backupDays" type="number" min="1" value="' + s.backupDays + '">') + '</div>' +
@@ -2524,7 +2890,7 @@
           $$('[data-rl]', f).forEach(function (el) { s.reviewLinks[el.dataset.rl] = el.value.trim(); });
           var badLink = Object.keys(s.reviewLinks).filter(function (k) { return s.reviewLinks[k] && !/^https:\/\//.test(s.reviewLinks[k]); });
           if (badLink.length) return toast('Links must start with https:// (' + badLink.join(', ') + ')', true);
-          s.idMode = f.elements.idMode.value; s.uploadDocs = f.elements.uploadDocs.checked; s.keepPhotosDays = Math.max(1, num(f.elements.keepPhotosDays.value) || 30);
+          s.idMode = f.elements.idMode.value; s.uploadDocs = f.elements.uploadDocs.checked; s.keepPhotosDays = Math.max(1, num(f.elements.keepPhotosDays.value) || 30); s.premiumStays = Math.max(1, Math.round(num(f.elements.premiumStays.value)) || 3); s.premiumSpend = Math.max(0, num(f.elements.premiumSpend.value));
           s.bookingPrefix = (f.elements.bookingPrefix.value || 'ATH').toUpperCase().replace(/[^A-Z0-9]/g, '') || 'ATH';
           if (s.seasons.some(function (se) { return se.from && se.to && se.from > se.to; })) return toast('A season ends before it starts.', true);
           save().then(function () { toast('Settings saved'); render(); });
@@ -2567,7 +2933,7 @@
     else if (data && data.settings.pinHash && hiddenAt && Date.now() - hiddenAt > num(data.settings.lockMinutes || 5) * 60000) { unlocked = false; render(); }
   });
   function renderLock() {
-    $('#title').textContent = S().businessName; $('#back').style.visibility = 'hidden';
+    $('#title').textContent = S().businessName; $('#back').style.display = 'none';
     $('#main').innerHTML = '<form id="lf" class="card lock"><div class="leaf">❦</div><h3>Enter PIN</h3><input id="pin" type="password" inputmode="numeric" autocomplete="off" maxlength="6"><button class="btn primary big">Unlock</button><p class="small">Forgot your PIN? Delete and re-add the app, then restore your latest backup.</p></form>';
     $('#pin').focus();
     $('#lf').onsubmit = function (ev) {
@@ -2601,7 +2967,7 @@
     var s = data.settings;
     if (!s.syncUrl || !s.syncToken) { if (manual) toast('Enter the web app URL and sync key first.', true); return; }
     if (!navigator.onLine) { if (manual) toast('You are offline. Data is safe on the phone; sync later.', true); return; }
-    if (syncing) { syncAgain = true; return; } syncing = true; syncAgain = false;
+    if (syncing) { syncAgain = true; return; } syncing = true; syncAgain = false; syncDot();
     var body = JSON.stringify({ token: s.syncToken, action: 'sync', sentAt: nowISO(), appVersion: APP_VERSION,
       data: { settings: Object.assign({}, s, { pinHash: '', pinSalt: '', syncToken: '' }), bookings: data.bookings, payments: data.payments, expenses: data.expenses, queries: data.queries, deleted: data.deleted || {} } });
     fetch(s.syncUrl, { method: 'POST', body: body, redirect: 'follow' })
@@ -2624,7 +2990,7 @@
         data.meta.lastSyncError = e.message || String(e); save(true);
         if (manual) toast('Sync failed: ' + data.meta.lastSyncError, true);
       })
-      .then(function () { syncing = false; $$('#smsg,[data-syncmsg]').forEach(function (sm) { sm.innerHTML = syncStatusHtml(); }); $$('[data-syncnow]').forEach(function (x) { x.disabled = false; x.textContent = 'Sync now'; }); if (syncAgain) { syncAgain = false; setTimeout(function () { syncNow(false); }, 300); } });
+      .then(function () { syncing = false; syncDot(); $$('#smsg,[data-syncmsg]').forEach(function (sm) { sm.innerHTML = syncStatusHtml(); }); $$('[data-syncnow]').forEach(function (x) { x.disabled = false; x.textContent = 'Sync now'; }); if (syncAgain) { syncAgain = false; setTimeout(function () { syncNow(false); }, 300); } });
   }
   /* Bring in what other devices (and the Sheet) changed. Newest change of each record wins; device-only settings stay. */
   function applyServer(remote) {
@@ -2742,7 +3108,7 @@
   window.addEventListener('online', function () { if (data && data.meta.lastSyncError) scheduleSync(); });
 
   /* ---------- offline indicator + service worker ---------- */
-  function netBadge() { $('#net').hidden = navigator.onLine; }
+  function netBadge() { $('#net').hidden = navigator.onLine; syncDot(); }
   window.addEventListener('online', netBadge); window.addEventListener('offline', netBadge);
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('sw.js').catch(function () {});
