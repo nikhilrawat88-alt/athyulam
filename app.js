@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var A = AH, inr = A.inr, num = A.num, r2 = A.r2;
-  var APP_VERSION = '2.0.0';
+  var APP_VERSION = '2.0.1';
 
   /* ---------- tiny helpers ---------- */
   function $(s, el) { return (el || document).querySelector(s); }
@@ -357,8 +357,9 @@
     var name = parts[0] || 'home', arg = parts.slice(1).join('/');
     var v = (routes[name] || routes.home)(decodeURIComponent(arg || ''));
     $('#title').textContent = v.title || S().businessName;
-    $('#back').style.display = v.back ? 'flex' : 'none'; $('#logo').style.display = v.back ? 'none' : '';
-    $('#back').onclick = function () { if (history.length > 1) history.back(); else go(v.back); };
+    var bk = $('#back'), lg = $('#logo');
+    if (bk) bk.style.display = v.back ? 'flex' : 'none'; if (lg) lg.style.display = v.back ? 'none' : '';
+    if (bk) bk.onclick = function () { if (history.length > 1) history.back(); else go(v.back); };
     var m = $('#main'); m.innerHTML = v.html;
     if (scroll) { m.classList.remove('enter'); void m.offsetWidth; m.classList.add('enter'); }
     var side = $$('#tabs a.side-only').filter(function (a) { return a.getAttribute('href') === '#/' + name; })[0];
@@ -2933,7 +2934,7 @@
     else if (data && data.settings.pinHash && hiddenAt && Date.now() - hiddenAt > num(data.settings.lockMinutes || 5) * 60000) { unlocked = false; render(); }
   });
   function renderLock() {
-    $('#title').textContent = S().businessName; $('#back').style.display = 'none';
+    $('#title').textContent = S().businessName; if ($('#back')) $('#back').style.display = 'none';
     $('#main').innerHTML = '<form id="lf" class="card lock"><div class="leaf">❦</div><h3>Enter PIN</h3><input id="pin" type="password" inputmode="numeric" autocomplete="off" maxlength="6"><button class="btn primary big">Unlock</button><p class="small">Forgot your PIN? Delete and re-add the app, then restore your latest backup.</p></form>';
     $('#pin').focus();
     $('#lf').onsubmit = function (ev) {
@@ -3112,6 +3113,19 @@
   window.addEventListener('online', netBadge); window.addEventListener('offline', netBadge);
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('sw.js').catch(function () {});
+  }
+
+  /* Version 2.0.1: if the phone still shows the page of an older version (cached), load the new page once.
+     Without this, the new code met the old page and stopped right after the PIN. */
+  if (!document.getElementById('logo')) {
+    try {
+      if (!sessionStorage.getItem('ahShellReload')) {
+        sessionStorage.setItem('ahShellReload', '1');
+        var reload = function () { location.reload(); };
+        if (navigator.serviceWorker && navigator.serviceWorker.getRegistration) navigator.serviceWorker.getRegistration().then(function (r) { return r && r.update(); }).then(reload, reload);
+        else reload();
+      }
+    } catch (e) { /* storage blocked: carry on with the old page (now safe) */ }
   }
 
   /* ---------- start ---------- */
