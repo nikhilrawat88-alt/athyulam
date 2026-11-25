@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var A = AH, inr = A.inr, num = A.num, r2 = A.r2;
-  var APP_VERSION = '2.0.7';
+  var APP_VERSION = '2.0.8';
 
   /* ---------- tiny helpers ---------- */
   function $(s, el) { return (el || document).querySelector(s); }
@@ -137,6 +137,7 @@
       syncUrl: '', syncToken: '', autoSync: true,
       mealRates: { Breakfast: 0, Lunch: 0, Dinner: 0 }, menu: JSON.parse(JSON.stringify(A.MENU_DEFAULT)),
       services: [{ name: 'Bonfire', rate: 0 }, { name: 'Pick-up / drop', rate: 0 }, { name: 'Sightseeing', rate: 0 }],
+      staff: [], staffLeaves: [],
       tokenAmount: 500, upiId: '', autoReviewEmail: false, customFields: [], couponPrefix: 'ATH', bookingPrefix: 'ATH', keepPhotosDays: 30, uploadDocs: true, repeatStays: 3, premiumOne: 10000, premiumThree: 15000,
       reviewLinks: {
         google: 'https://share.google/sGf4Yhq7SHDDbqd9y',
@@ -2575,7 +2576,7 @@
   /* ---------- MORE ---------- */
   routes.more = function () {
     var groups = [
-      ['Daily work', [['today', 'Today’s arrivals & departures', 'login'], ['housekeeping', 'Housekeeping board', 'broom'], ['cashclose', 'Daily cash close', 'wallet'], ['guestqr', 'Guest QR page (Wi-Fi, rules, menu)', 'qr'], ['future', 'Future bookings', 'calendar'], ['pending', 'Pending payments', 'rupee']]],
+      ['Daily work', [['today', 'Today’s arrivals & departures', 'login'], ['housekeeping', 'Housekeeping board', 'broom'], ['cashclose', 'Daily cash close', 'wallet'], ['guestqr', 'Guest QR page (Wi-Fi, rules, menu)', 'qr'], ['future', 'Future bookings', 'calendar'], ['pending', 'Pending payments', 'rupee'], ['staff', 'Staff & leave', 'user']]],
       ['Connections', [['reminders', 'Notifications & reminders', 'bell'], ['otacal', 'Airbnb, Booking.com & MMT calendars', 'link']]],
       ['Data & setup', [['backup', 'Backup & restore', 'shield'], ['importbk', 'Import old bookings', 'upload'], ['import', 'Import old queries', 'upload'], ['settings', 'Settings', 'settings'], ['about', 'Where my data is stored', 'info']]]];
     return { title: 'More', tab: 'more', html: groups.map(function (g) {
@@ -3116,7 +3117,7 @@
         Object.keys(j.folders || {}).forEach(function (id) { var bk = booking(id); if (bk) bk.driveUrl = j.folders[id]; });
         return save(true).then(function () {
           /* records were replaced by the merged copy: redraw so buttons act on the fresh records (not while a form is open) */
-          if (j.data && !/^#\/(new|edit|gx|pay|qnew|qedit|settings|importbk|import|formc)/.test(location.hash)) render();
+          if (j.data && !/^#\/(new|edit|gx|pay|qnew|qedit|settings|importbk|import|formc|staffedit|leave)/.test(location.hash)) render();
           if (manual) toast('Synced to Google Sheet'); return uploadDocs(manual);
         }).then(function () { if (docsRedraw && /^#\/gx\//.test(location.hash)) try { docsRedraw(); } catch (e) { /* screen changed */ }
         });
@@ -3266,5 +3267,7 @@
   load().then(function () { netBadge(); render(); }).catch(function (e) {
     $('#main').innerHTML = '<div class="warn">This browser blocked local storage (' + esc(e.message) + '). On iPhone, open the app from the Home Screen icon, and make sure Private Browsing is off.</div>';
   });
-  window.AHApp = { _data: function () { return data; }, _save: function () { return save(true); }, _sync: function () { return waitSync(); }, go: go };
+  window.AHApp = { _data: function () { return data; }, _save: function () { return save(true); }, _sync: function () { return waitSync(); }, go: go,
+    /* Version 2.0.8: used by staff-leave.js */
+    ext: { routes: routes, S: S, save: save, render: render, go: go, esc: esc, field: field, options: options, tile: tile, empty: empty, inr: inr, fmtDate: fmtDate, fmtShort: fmtShort, fmtMonth: fmtMonth, today: today, uid: uid, nowISO: nowISO, toast: toast } };
 })();
