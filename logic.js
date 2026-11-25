@@ -346,10 +346,30 @@ var AH = (function () {
   var OTA = [{ id: 'airbnb', name: 'Airbnb' }, { id: 'booking', name: 'Booking.com' }, { id: 'mmt', name: 'MakeMyTrip' }];
   function otaName(id) { var o = OTA.filter(function (x) { return x.id === id; })[0]; return o ? o.name : id; }
   /* Calendar blocks that touch these rooms on these dates (the 4BHK counts as all its rooms). */
-  function extOverlaps(ext, cand, settings) {
+  /* v2.0.9: when one room of the 4BHK is sold, the platforms close the whole 4BHK listing. That closure is not a booking:
+     a block on a whole-house unit is ignored for its separate rooms when, on every night of the block, one of its rooms is
+     already taken (by a stay in the app or a platform block on that room). A booking of the 4BHK itself still clashes with it. */
+  function unitClosedByRoom(x, unit, ext, bookings) {
+    var inc = unit.includes || [], d = x.s, guard = 0;
+    if (!isDate(x.s) || !isDate(x.e) || x.e <= x.s) return false;
+    var takenOn = function (day) {
+      return (bookings || []).some(function (b) { return isActive(b) && isDate(b.checkIn) && b.checkIn <= day && day < b.checkOut && roomIds(b).some(function (r) { return inc.indexOf(r) >= 0; }); }) ||
+        (((ext || {}).blocks) || []).some(function (y) { return inc.indexOf(y.u) >= 0 && y.s <= day && day < y.e; });
+    };
+    while (d < x.e && guard++ < 800) { if (!takenOn(d)) return false; d = addDays(d, 1); }
+    return true;
+  }
+  function extOverlaps(ext, cand, settings, bookings) {
     if (!roomIds(cand).length || !isDate(cand.checkIn) || !isDate(cand.checkOut)) return [];
-    var mine = blockedIds(roomIds(cand), settings);
-    return (((ext || {}).blocks) || []).filter(function (x) { return x.s < cand.checkOut && cand.checkIn < x.e && mine.indexOf(x.u) >= 0; });
+    var own = roomIds(cand), mine = blockedIds(own, settings), rooms = ((settings || {}).rooms || []);
+    var all = (bookings || []).slice(); /* the saved copy of this stay counts too: a closure it caused is not a clash */
+    if (isActive(cand)) all = all.concat([cand]);
+    return (((ext || {}).blocks) || []).filter(function (x) {
+      if (!(x.s < cand.checkOut && cand.checkIn < x.e && mine.indexOf(x.u) >= 0)) return false;
+      var unit = rooms.filter(function (r) { return r.id === x.u && (r.includes || []).length; })[0];
+      if (!unit || own.indexOf(unit.id) >= 0) return true;
+      return !unitClosedByRoom(x, unit, ext, all);
+    });
   }
   /* A block that is simply this booking seen from its own platform: same platform as the source, same room, same dates. */
   function isOwnEcho(x, b) { return otaName(x.p) === b.source && roomIds(b).indexOf(x.u) >= 0 && x.s === b.checkIn && x.e === b.checkOut; }
@@ -359,7 +379,7 @@ var AH = (function () {
     var out = [], st = data.settings || {};
     (data.bookings || []).forEach(function (b) {
       if (!isActive(b) || !isDate(b.checkOut) || b.checkOut <= today) return;
-      extOverlaps(data.ext, b, st).forEach(function (x) { if (!isOwnEcho(x, b) && x.e > today) out.push({ b: b, x: x }); });
+      extOverlaps(data.ext, b, st, data.bookings).forEach(function (x) { if (!isOwnEcho(x, b) && x.e > today) out.push({ b: b, x: x }); });
     });
     return out;
   }

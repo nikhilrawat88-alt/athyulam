@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var A = AH, inr = A.inr, num = A.num, r2 = A.r2;
-  var APP_VERSION = '2.0.8';
+  var APP_VERSION = '2.0.9';
 
   /* ---------- tiny helpers ---------- */
   function $(s, el) { return (el || document).querySelector(s); }
@@ -961,7 +961,7 @@
       /* Only redraw the warning when its text changes: redrawing while the guest taps the box (a blur on another field
          fires "change") destroyed the checkbox under the finger, so the tick never landed. */
       var ovMsg = ov.length && b.status !== 'Cancelled' ? esc(roomsLabel(b)) + ' is already taken by ' + ov.map(function (o) { return esc(gname(o)) + ' (' + esc(roomsLabel(o)) + ', ' + fmtShort(o.checkIn) + '–' + fmtShort(o.checkOut) + ', ' + esc(o.status) + ')'; }).join('; ') : '';
-      var xo = A.isActive(b) ? A.extOverlaps(data.ext, b, S()).filter(function (x) { return !A.isOwnEcho(x, b); }) : [];
+      var xo = A.isActive(b) ? A.extOverlaps(data.ext, b, S(), data.bookings).filter(function (x) { return !A.isOwnEcho(x, b); }) : [];
       if (!ov.length && xo.length) ovMsg = 'x:' + xo.map(function (x) { return A.otaName(x.p) + ' has ' + roomName(x.u) + ' blocked ' + fmtShort(x.s) + '–' + fmtShort(x.e); }).join('; ');
       var ovBox = $('#overlap');
       if (ovBox.dataset.msg !== ovMsg && /^x:/.test(ovMsg)) { ovBox.dataset.msg = ovMsg; ovBox.innerHTML = '<div class="warn"><b>Dates blocked on another platform.</b> ' + esc(ovMsg.slice(2)) + '. If this is that same booking, save it with the matching source. Otherwise these nights may already be sold.</div>'; }
@@ -998,7 +998,7 @@
         var first = f.elements[keys[0]]; if (keys[0] !== 'override' && first && first.focus) first.focus(); else (keys[0] === 'override' ? $('#overlap') : $('#errsum')).scrollIntoView({ block: 'center' });
         return;
       }
-      var xo2 = A.isActive(b) ? A.extOverlaps(data.ext, b, S()).filter(function (x) { return !A.isOwnEcho(x, b); }) : [];
+      var xo2 = A.isActive(b) ? A.extOverlaps(data.ext, b, S(), data.bookings).filter(function (x) { return !A.isOwnEcho(x, b); }) : [];
       if (xo2.length && !confirm('These nights are blocked on ' + xo2.map(function (x) { return A.otaName(x.p) + ' (' + roomName(x.u) + ', ' + fmtShort(x.s) + '–' + fmtShort(x.e) + ')'; }).join(', ') + '.\n\nPress OK only if this is that same booking or you have checked the platform. Press Cancel to change the dates or room.')) return;
       if (S().gstOn && !b.gstOn && A.isActive(b) && A.nights(b.checkIn, b.checkOut) > 0 && A.roomTotal(b) / A.nights(b.checkIn, b.checkOut) > 1000 &&
           !confirm('Save this bill WITHOUT GST?\n\nYou are GST-registered and the room is above ₹1,000 per night. Only continue if your CA has confirmed no GST applies.')) return;
@@ -2109,7 +2109,9 @@
   /* ---------- ROOM CALENDAR + availability + cleaning ---------- */
   var calMonth = null;
   /* Platform blocks covering this room on this night (the 4BHK counts as all its rooms). */
-  function extAt(roomId, ds) { return A.extOverlaps(data.ext, { rooms: [{ roomId: roomId }], checkIn: ds, checkOut: A.addDays(ds, 1) }, S()); }
+  function extAt(roomId, ds) { return A.extOverlaps(data.ext, { id: '__cal__', rooms: [{ roomId: roomId }], checkIn: ds, checkOut: A.addDays(ds, 1) }, S(), data.bookings); }
+  /* v2.0.9: platform clash for a stay on one night, judged by the stay's own rooms (so a 4BHK closure caused by one of its rooms is not a clash) */
+  function extClashFor(b, ds) { return A.extOverlaps(data.ext, { id: b.id, status: b.status, rooms: (b.rooms || []), roomId: b.roomId, checkIn: ds, checkOut: A.addDays(ds, 1) }, S(), data.bookings).some(function (x) { return !A.isOwnEcho(x, b); }); }
   /* Version 2.0: the room calendar draws each stay as one bar with the guest's name. Tap (or drag with a mouse)
      across empty nights to start a booking for those dates. */
   function roomsNav(on) {
@@ -2128,7 +2130,7 @@
     function cellInfo(r, ds) {
       var bk = data.bookings.filter(function (b) { return A.blockedIds(A.roomIds(b), s).indexOf(r.id) >= 0 && (A.isActive(b) || b.status === 'Enquiry') && A.isDate(b.checkIn) && b.checkIn <= ds && b.checkOut > ds; });
       if (bk.length) {
-        var b = bk[0], xclash = A.isActive(b) && extAt(r.id, ds).some(function (x) { return !A.isOwnEcho(x, b); });
+        var b = bk[0], xclash = A.isActive(b) && extClashFor(b, ds);
         /* on the whole-house row (4BHK), two of its rooms booked by different guests is not a clash; it is one only when the 4BHK itself is booked too */
         var virt = (r.includes || []).length > 0, direct = bk.filter(function (x) { return A.roomIds(x).indexOf(r.id) >= 0; }).length;
         return { key: 'b:' + b.id, b: b, clash: (bk.length > 1 && (!virt || direct > 0)) || xclash };
