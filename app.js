@@ -1591,7 +1591,7 @@
         $$('[data-billok]').forEach(function (btn) { btn.onclick = function () { var x = (liveB().bills || []).filter(function (y) { return y.id === btn.dataset.billok; })[0]; if (x) { x.flags = []; later(true); } }; });
         $('#exd').oninput = function () { liveB().extrasDiscount = r2(this.value); var e = A.validateBooking(liveB(), S()).extrasDiscount; if (e) { toast(e, true); liveB().extrasDiscount = 0; } later(); };
         $('#stg').onchange = function () { liveB().stmtGst = this.checked; later(); };
-        $$('[data-doc]').forEach(function (btn) { btn.onclick = function () { clearTimeout(fsTimer); save().then(function () { sendDoc(liveB(), 'statement', btn); }); }; });
+        $$('[data-doc]').forEach(function (btn) { btn.onclick = function () { clearTimeout(fsTimer); if (btn._ready) return sendDoc(liveB(), 'statement', btn); save().then(function () { sendDoc(liveB(), 'statement', btn); }); }; });
         bindSyncCard();
 
         /* ---- bill photo → text (Sheet / Google Drive OCR) → lines ---- */
@@ -3150,7 +3150,17 @@
     data.meta.lastMergeStats = m.stats;
   }
   /* Confirmation / invoice PDF from the Sheet, then the share menu (WhatsApp) with the file attached. */
+  function markSent(b, kind) { b[kind === 'invoice' ? 'invoiceSentAt' : kind === 'statement' ? 'statementSentAt' : 'confirmationSentAt'] = nowISO(); save(); }
+  /* 2.1.0: iPhone allows the share menu only straight from a tap. Making the PDF takes a few seconds, so iOS refuses
+     (NotAllowedError). Then the button keeps the ready PDF and the next tap opens the share menu at once. */
+  function shareReady(b, kind, btn) {
+    var r = btn._ready; btn._ready = null;
+    var p; try { p = navigator.share({ files: [r.file], text: r.text, title: r.file.name }); } catch (e) { p = Promise.reject(e); }
+    p.then(function () { markSent(b, kind); toast('Shared'); }).catch(function (e) { if (!e || e.name !== 'AbortError') toast(e && e.message || String(e), true); })
+      .then(function () { btn.disabled = false; btn.classList.remove('ready'); btn.textContent = r.label; });
+  }
   function sendDoc(b, kind, btn) {
+    if (btn._ready) return shareReady(b, kind, btn);
     var s = S();
     if (!s.syncUrl || !s.syncToken) return toast('Set up Cloud sync first (More → Settings).', true);
     if (!navigator.onLine) return toast('You are offline. Try again with internet.', true);
@@ -3171,12 +3181,15 @@
       var file = null; try { file = new File([blob], name, { type: 'application/pdf' }); } catch (e) { file = null; }
       if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
         return navigator.share({ files: [file], text: text, title: name }).then(function () {
-          b[kind === 'invoice' ? 'invoiceSentAt' : kind === 'statement' ? 'statementSentAt' : 'confirmationSentAt'] = nowISO(); save(); toast('Shared');
-        }).catch(function (e) { if (e && e.name !== 'AbortError') throw e; });
+          markSent(b, kind); toast('Shared');
+        }).catch(function (e) {
+          if (e && e.name === 'NotAllowedError') { btn._ready = { file: file, text: text, label: label }; label = 'PDF ready — tap to send'; btn.classList.add('ready'); return; }
+          if (e && e.name !== 'AbortError') throw e;
+        });
       }
       var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
       if (b.phone) window.open(waLink(b.phone, text + (j.page ? '\n\n' + j.page : '')), '_blank');
-      b[kind === 'invoice' ? 'invoiceSentAt' : kind === 'statement' ? 'statementSentAt' : 'confirmationSentAt'] = nowISO(); save();
+      markSent(b, kind);
       toast('PDF downloaded. WhatsApp opened: attach the PDF from Downloads, or send the link in the message.');
     }).catch(function (e) { toast(e.message || String(e), true); }).then(done);
   }
