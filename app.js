@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var A = AH, inr = A.inr, num = A.num, r2 = A.r2;
-  var APP_VERSION = '2.0.9';
+  var APP_VERSION = '2.1.0';
 
   /* ---------- tiny helpers ---------- */
   function $(s, el) { return (el || document).querySelector(s); }
@@ -2511,6 +2511,7 @@
       '<a class="btn' + (kind === 'confirmation' ? ' on' : '') + '" href="#/bill/' + b.id + '/confirmation">Confirmation</a>' + '<a class="btn' + (kind === 'statement' ? ' on' : '') + '" href="#/bill/' + b.id + '/statement">Food & services</a>' +
       (b.status === 'Checked Out' ? '<a class="btn' + (kind === 'invoice' ? ' on' : '') + '" href="#/bill/' + b.id + '/invoice">Invoice</a>' : '') + '</div>' +
       (kind === 'invoice' && !b.invoiceNo ? '<div class="warn noprint">The invoice number is given by your Google Sheet at the next sync.</div>' : '') +
+      (kind !== 'statement' && !A.upiOk(S().upiId) ? '<div class="warn noprint">' + (S().upiId ? 'The UPI ID in Settings does not look right (example: name@okhdfcbank), so' : 'No UPI ID in Settings, so') + ' no payment QR is printed. Add it in <a href="#/settings">More → Settings → Your UPI ID</a>.</div>' : '') +
       '<div class="docwrap">' + A.docHtml(kind, b, data) + '</div>';
     return { title: kind === 'invoice' ? 'Tax invoice' : kind === 'statement' ? 'Food & services statement' : 'Booking confirmation', back: kind === 'statement' ? '#/fs/' + b.id : '#/guest/' + b.id, tab: 'bookings', html: html };
   };

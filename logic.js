@@ -1263,6 +1263,7 @@ var AH = (function () {
     '.ahdoc .ref td{background:#efe4cf !important;font-weight:bold;color:#1e3a2b}.ahdoc h3{font-size:11pt;color:#1e3a2b;margin:16px 0 6px;border-bottom:2px solid #b8955a;padding-bottom:3px}' +
     '.ahdoc .r{text-align:right}.ahdoc .tot td{font-weight:bold;background:#f7f5ef}.ahdoc .grand td{font-weight:bold;font-size:11pt;background:#1e3a2b;color:#fff}' +
     '.ahdoc .small,.ahdoc td.small{font-size:8.5pt !important;color:#68716a;line-height:1.5}.ahdoc .times td{border:1px solid #d9d4c7;text-align:center;width:50%}.ahdoc .times b{display:block;font-size:13pt;color:#1e3a2b}' +
+    '.ahdoc .payqr{margin-top:12px;border:1px solid #d9d4c7;border-left:4px solid #b8955a;page-break-inside:avoid;break-inside:avoid}.ahdoc .payqr td{vertical-align:middle;padding:8px 10px}.ahdoc .payqr svg{width:30mm;height:30mm;display:block}.ahdoc .payqr .amt{font-size:13pt;font-weight:bold;color:#1e3a2b}' +
     '.ahdoc .foot{margin-top:18px;border-top:1px solid #d9d4c7;padding-top:8px;text-align:center;font-size:8.5pt;color:#68716a}</style>';
   function letterhead(B, title, metaRows) {
     return '<table class="lh"><tr><td style="width:84px"><img src="' + h(B.logo) + '" style="width:72px;height:72px;border-radius:10px" alt=""></td>' +
@@ -1273,6 +1274,30 @@ var AH = (function () {
       metaRows.map(function (m) { return '<tr><td class="k r">' + h(m[0]) + '</td><td><b>' + h(m[1]) + '</b></td></tr>'; }).join('') + '</table></td></tr></table>';
   }
   function roomNameIn(settings, id) { var r = ((settings || {}).rooms || []).filter(function (x) { return x.id === id; })[0]; return r ? r.name : (id || 'Room'); }
+  /* 2.1.0 Payment QR (UPI). upi://pay link with payee, name, amount and the invoice / booking number as the note.
+     The QR is drawn only where lib/qr.js is loaded (the app). In Google Apps Script (Drive PDFs) there is no QR library,
+     so the box shows the UPI ID and amount as text instead. */
+  function upiOk(id) { return /^[A-Za-z0-9._-]{2,256}@[A-Za-z][A-Za-z0-9.-]{1,63}$/.test(String(id || '').trim()); }
+  function upiLink(id, name, amount, note) {
+    var e = function (x) { return encodeURIComponent(String(x || '').trim()); };
+    return 'upi://pay?pa=' + e(id).replace(/%40/g, '@') + '&pn=' + e(name) + (amount > 0 ? '&am=' + (Math.round(amount * 100) / 100).toFixed(2) : '') + '&cu=INR' + (note ? '&tn=' + e(String(note).slice(0, 50)) : '');
+  }
+  function qrPaths(text) {
+    if (typeof qrcode === 'undefined') return null;
+    try {
+      var q = qrcode(0, 'M'); q.addData(text, 'Byte'); q.make();
+      var n = q.getModuleCount(), d = '';
+      for (var r = 0; r < n; r++) for (var c = 0; c < n; c++) if (q.isDark(r, c)) d += 'M' + c + ' ' + r + 'h1v1h-1z';
+      return '<svg viewBox="-3 -3 ' + (n + 6) + ' ' + (n + 6) + '" shape-rendering="crispEdges" role="img" aria-label="UPI payment QR"><rect x="-3" y="-3" width="' + (n + 6) + '" height="' + (n + 6) + '" fill="#fff"/><path d="' + d + '" fill="#000"/></svg>';
+    } catch (err) { return null; }
+  }
+  function payQrHtml(st, B, amount, note, label) {
+    var id = String((st || {}).upiId || '').trim();
+    if (!(amount > 0.005) || !upiOk(id)) return '';
+    var svg = qrPaths(upiLink(id, B.legalName || B.name, amount, note));
+    return '<table class="payqr"><tr>' + (svg ? '<td style="width:32mm">' + svg + '</td>' : '') + '<td><div class="small" style="color:#1e3a2b;font-weight:bold">' + h(label) + '</div>' +
+      '<div class="amt">' + inr(amount, true) + '</div><div class="small">' + (svg ? 'Scan with any UPI app (GPay, PhonePe, Paytm, BHIM). ' : '') + 'UPI ID: <b>' + h(id) + '</b>' + (note ? '<br>Please keep ' + h(note) + ' as the payment note.' : '') + '</div></td></tr></table>';
+  }
   /* kind: 'confirmation' or 'invoice'. Returns a complete HTML fragment with its own styles (PDF and screen). */
   function docHtml(kind, b, data) {
     var st = (data && data.settings) || {}, B = biz(st), c = calc(b, (data && data.payments) || []), inv = kind === 'invoice';
@@ -1303,6 +1328,7 @@ var AH = (function () {
         '<tr class="grand"><td>Total</td><td class="r">' + inr(c.total, true) + '</td></tr>' +
         '<tr><td>Amount received</td><td class="r">' + inr(c.received, true) + '</td></tr>' +
         '<tr class="tot"><td>' + (c.outstanding < 0 ? 'Refund due to you' : 'Balance payable at check-in') + '</td><td class="r">' + inr(Math.abs(c.outstanding), true) + '</td></tr></table>';
+      if (b.status !== 'Cancelled') out += payQrHtml(st, B, r2(c.outstanding), b.no || '', 'Pay by UPI');
       out += '<table class="times" style="margin-top:14px"><tr><td>Check-in time<b>' + h(B.checkInTime) + '</b></td><td>Check-out time<b>' + h(B.checkOutTime) + '</b></td></tr></table>';
       out += '<h3>Please note</h3><p class="small">• Every guest needs a valid photo ID at check-in (Aadhaar, passport, driving licence or voter ID). Foreign nationals: passport and valid visa.<br>' +
         '• Early check-in and late check-out depend on availability.<br>• For directions or any change to your booking, call or WhatsApp us on ' + h(B.phone) + '.</p>';
@@ -1338,6 +1364,7 @@ var AH = (function () {
         '<tr><td>Amount received</td><td class="r">' + inr(c.received, true) + '</td></tr><tr class="tot"><td>' + (c.outstanding < 0 ? 'Refund due' : 'Balance due') + '</td><td class="r">' + inr(Math.abs(c.outstanding), true) + '</td></tr></table>';
       var pays = paymentsFor(b, data.payments);
       if (pays.length) out += '<p class="small">Payments: ' + pays.map(function (p) { return h(fmtLong(p.date)) + ' ' + h(p.method) + ' ' + (p.type === 'refund' ? '−' : '') + inr(p.amount, true); }).join(' · ') + '</p>';
+      out += payQrHtml(st, B, r2(c.outstanding), b.invoiceNo || b.no || '', 'Balance due — pay by UPI');
       out += '<table style="margin-top:14px"><tr><td style="padding:0" class="small">Tax payable on reverse charge: No<br>Place of supply: ' + h(B.stateName) + ' (' + h(B.stateCode) + ')<br>Check-in ' + h(B.checkInTime) + ' · Check-out ' + h(B.checkOutTime) + '</td>' +
         '<td style="padding:0;text-align:right;width:45%">For <b>' + h(B.legalName || B.name) + '</b><br><br><br>Authorised signatory</td></tr></table>';
     }
@@ -1464,7 +1491,7 @@ var AH = (function () {
     formCPending: formCPending, merge: merge, validateBooking: validateBooking, autoRoomGstRate: autoRoomGstRate,
     rateCardTotal: rateCardTotal, activeRooms: activeRooms, paymentsFor: paymentsFor, inr: inr,
     DEFAULT_LOGO: DEFAULT_LOGO, BUSINESS_DEFAULTS: BUSINESS_DEFAULTS, fyKey: fyKey, isLegacyNo: isLegacyNo, nextBookingNo: nextBookingNo, numberBookings: numberBookings, OTA: OTA, otaName: otaName, extOverlaps: extOverlaps, isOwnEcho: isOwnEcho, extConflicts: extConflicts, keepInvoice: keepInvoice, invoiceNo: invoiceNo, needsInvoice: needsInvoice, assignInvoices: assignInvoices,
-    syncMerge: syncMerge, keepDocs: keepDocs, blockedIds: blockedIds, stayLabel: stayLabel, stayDays: stayDays, MENU_DEFAULT: MENU_DEFAULT, menuOf: menuOf, normText: normText, matchItem: matchItem, parseBill: parseBill, flagText: flagText, flaggedLines: flaggedLines, statementLines: statementLines, dayDate: dayDate, MEALS: MEALS, billLines: billLines, chargeLines: chargeLines, applyCharges: applyCharges, validateGuest: validateGuest, validateCustom: validateCustom, docHtml: docHtml, amountInWords: amountInWords, biz: biz, fmtLong: fmtLong, maskId: maskId, importOld: importOld, oldRoomRate: oldRoomRate, COLLS: COLLS
+    syncMerge: syncMerge, keepDocs: keepDocs, blockedIds: blockedIds, stayLabel: stayLabel, stayDays: stayDays, MENU_DEFAULT: MENU_DEFAULT, menuOf: menuOf, normText: normText, matchItem: matchItem, parseBill: parseBill, flagText: flagText, flaggedLines: flaggedLines, statementLines: statementLines, dayDate: dayDate, MEALS: MEALS, billLines: billLines, chargeLines: chargeLines, applyCharges: applyCharges, validateGuest: validateGuest, validateCustom: validateCustom, docHtml: docHtml, upiOk: upiOk, upiLink: upiLink, amountInWords: amountInWords, biz: biz, fmtLong: fmtLong, maskId: maskId, importOld: importOld, oldRoomRate: oldRoomRate, COLLS: COLLS
   };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = AH;
