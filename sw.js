@@ -1,7 +1,7 @@
 /* Offline support: keeps a copy of the app files on the phone. Guest data is never cached here.
    Version 2.0.1: when online, the app files always come fresh from the internet (so the page and the code never
    come from two different versions); the saved copy is used only when offline. */
-var CACHE = 'athulyam-v2.1.1';
+var CACHE = 'athulyam-v2.1.2';
 var FILES = ['./', './index.html', './app.js', './leave-logic.js', './staff-leave.js', './logic.js', './xlsx.js', './lib/qr.js', './lib/fflate.js', './guest.html', './manifest.json', './fonts/inter-latin-wght-normal.woff2', './fonts/playfair-display-latin-600-normal.woff2',
   './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png', './icons/apple-touch-icon.png'];
 self.addEventListener('install', function (e) {

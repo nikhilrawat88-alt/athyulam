@@ -1263,7 +1263,7 @@ var AH = (function () {
     '.ahdoc .ref td{background:#efe4cf !important;font-weight:bold;color:#1e3a2b}.ahdoc h3{font-size:11pt;color:#1e3a2b;margin:16px 0 6px;border-bottom:2px solid #b8955a;padding-bottom:3px}' +
     '.ahdoc .r{text-align:right}.ahdoc .tot td{font-weight:bold;background:#f7f5ef}.ahdoc .grand td{font-weight:bold;font-size:11pt;background:#1e3a2b;color:#fff}' +
     '.ahdoc .small,.ahdoc td.small{font-size:8.5pt !important;color:#68716a;line-height:1.5}.ahdoc .times td{border:1px solid #d9d4c7;text-align:center;width:50%}.ahdoc .times b{display:block;font-size:13pt;color:#1e3a2b}' +
-    '.ahdoc .payqr{margin-top:12px;border:1px solid #d9d4c7;border-left:4px solid #b8955a;page-break-inside:avoid;break-inside:avoid}.ahdoc .payqr td{vertical-align:middle;padding:8px 10px}.ahdoc .payqr svg{width:30mm;height:30mm;display:block}.ahdoc .payqr .amt{font-size:13pt;font-weight:bold;color:#1e3a2b}' +
+    '.ahdoc .payqr{margin-top:12px;border:1px solid #d9d4c7;border-left:4px solid #b8955a;page-break-inside:avoid;break-inside:avoid}.ahdoc .payqr td{vertical-align:middle;padding:8px 10px}.ahdoc .payqr img{width:30mm;height:30mm;display:block}.ahdoc .payqr .amt{font-size:13pt;font-weight:bold;color:#1e3a2b}' +
     '.ahdoc .foot{margin-top:18px;border-top:1px solid #d9d4c7;padding-top:8px;text-align:center;font-size:8.5pt;color:#68716a}</style>';
   function letterhead(B, title, metaRows) {
     return '<table class="lh"><tr><td style="width:84px"><img src="' + h(B.logo) + '" style="width:72px;height:72px;border-radius:10px" alt=""></td>' +
@@ -1282,13 +1282,58 @@ var AH = (function () {
     var e = function (x) { return encodeURIComponent(String(x || '').trim()); };
     return 'upi://pay?pa=' + e(id).replace(/%40/g, '@') + '&pn=' + e(name) + (amount > 0 ? '&am=' + (Math.round(amount * 100) / 100).toFixed(2) : '') + '&cu=INR' + (note ? '&tn=' + e(String(note).slice(0, 50)) : '');
   }
+  /* 2.1.2: the QR is a PNG image (data URI), made in plain JavaScript. It shows the same in the app, on print and in the
+     PDFs made by the Google Sheet (Apps Script has no SVG in its PDF maker, but shows PNG images, like the logo).
+     Needs the QR library: lib/qr.js in the app; in Apps Script it comes in the same "Logic" file. */
+  var CRC_T = null;
+  function crc32(bytes) {
+    if (!CRC_T) { CRC_T = []; for (var n = 0; n < 256; n++) { var c = n; for (var k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; CRC_T[n] = c >>> 0; } }
+    var x = 0xFFFFFFFF; for (var i = 0; i < bytes.length; i++) x = CRC_T[(x ^ bytes[i]) & 255] ^ (x >>> 8); return (x ^ 0xFFFFFFFF) >>> 0;
+  }
+  function u32(v) { return [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255]; }
+  function b64(bytes) {
+    var T = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/', o = '';
+    for (var i = 0; i < bytes.length; i += 3) {
+      var a = bytes[i], b = i + 1 < bytes.length ? bytes[i + 1] : 0, c = i + 2 < bytes.length ? bytes[i + 2] : 0;
+      o += T.charAt(a >> 2) + T.charAt(((a & 3) << 4) | (b >> 4)) + (i + 1 < bytes.length ? T.charAt(((b & 15) << 2) | (c >> 6)) : '=') + (i + 2 < bytes.length ? T.charAt(c & 63) : '=');
+    }
+    return o;
+  }
+  /* black-and-white PNG, 1 bit per pixel, stored (uncompressed) deflate: small and simple */
+  function qrPng(q, scale, quiet) {
+    var n = q.getModuleCount(), W = (n + 2 * quiet) * scale, rowLen = Math.ceil(W / 8), raw = [];
+    for (var y = 0; y < W; y++) {
+      raw.push(0);
+      var my = Math.floor(y / scale) - quiet;
+      for (var bx = 0; bx < rowLen; bx++) {
+        var byte = 0;
+        for (var bit = 0; bit < 8; bit++) {
+          var x = bx * 8 + bit, mx = Math.floor(x / scale) - quiet;
+          var dark = x < W && my >= 0 && my < n && mx >= 0 && mx < n && q.isDark(my, mx);
+          if (!dark) byte |= 128 >> bit;
+        }
+        raw.push(byte);
+      }
+    }
+    var z = [0x78, 0x01], s1 = 1, s2 = 0;
+    for (var i = 0; i < raw.length; i++) { s1 = (s1 + raw[i]) % 65521; s2 = (s2 + s1) % 65521; }
+    for (var off = 0; off < raw.length || off === 0; off += 65535) {
+      var len = Math.min(65535, raw.length - off), last = off + len >= raw.length ? 1 : 0;
+      z.push(last, len & 255, len >> 8, ~len & 255, (~len >> 8) & 255);
+      for (var j = 0; j < len; j++) z.push(raw[off + j]);
+      if (last) break;
+    }
+    z = z.concat(u32(((s2 << 16) | s1) >>> 0));
+    function chunk(type, data) { var t = [type.charCodeAt(0), type.charCodeAt(1), type.charCodeAt(2), type.charCodeAt(3)].concat(data); return u32(data.length).concat(t, u32(crc32(t))); }
+    var png = [137, 80, 78, 71, 13, 10, 26, 10].concat(chunk('IHDR', u32(W).concat(u32(W), [1, 0, 0, 0, 0])), chunk('IDAT', z), chunk('IEND', []));
+    return { uri: 'data:image/png;base64,' + b64(png), px: W };
+  }
   function qrPaths(text) {
     if (typeof qrcode === 'undefined') return null;
     try {
       var q = qrcode(0, 'M'); q.addData(text, 'Byte'); q.make();
-      var n = q.getModuleCount(), d = '';
-      for (var r = 0; r < n; r++) for (var c = 0; c < n; c++) if (q.isDark(r, c)) d += 'M' + c + ' ' + r + 'h1v1h-1z';
-      return '<svg viewBox="-3 -3 ' + (n + 6) + ' ' + (n + 6) + '" shape-rendering="crispEdges" role="img" aria-label="UPI payment QR"><rect x="-3" y="-3" width="' + (n + 6) + '" height="' + (n + 6) + '" fill="#fff"/><path d="' + d + '" fill="#000"/></svg>';
+      var img = qrPng(q, 6, 3);
+      return '<img class="qrimg" src="' + img.uri + '" width="113" height="113" style="width:30mm;height:30mm;display:block;image-rendering:pixelated" alt="UPI payment QR">';
     } catch (err) { return null; }
   }
   function payQrHtml(st, B, amount, note, label) {
@@ -1493,7 +1538,7 @@ var AH = (function () {
     formCPending: formCPending, merge: merge, validateBooking: validateBooking, autoRoomGstRate: autoRoomGstRate,
     rateCardTotal: rateCardTotal, activeRooms: activeRooms, paymentsFor: paymentsFor, inr: inr,
     DEFAULT_LOGO: DEFAULT_LOGO, BUSINESS_DEFAULTS: BUSINESS_DEFAULTS, fyKey: fyKey, isLegacyNo: isLegacyNo, nextBookingNo: nextBookingNo, numberBookings: numberBookings, OTA: OTA, otaName: otaName, extOverlaps: extOverlaps, isOwnEcho: isOwnEcho, extConflicts: extConflicts, keepInvoice: keepInvoice, invoiceNo: invoiceNo, needsInvoice: needsInvoice, assignInvoices: assignInvoices,
-    syncMerge: syncMerge, keepDocs: keepDocs, blockedIds: blockedIds, stayLabel: stayLabel, stayDays: stayDays, MENU_DEFAULT: MENU_DEFAULT, menuOf: menuOf, normText: normText, matchItem: matchItem, parseBill: parseBill, flagText: flagText, flaggedLines: flaggedLines, statementLines: statementLines, dayDate: dayDate, MEALS: MEALS, billLines: billLines, chargeLines: chargeLines, applyCharges: applyCharges, validateGuest: validateGuest, validateCustom: validateCustom, docHtml: docHtml, upiOk: upiOk, upiLink: upiLink, amountInWords: amountInWords, biz: biz, fmtLong: fmtLong, maskId: maskId, importOld: importOld, oldRoomRate: oldRoomRate, COLLS: COLLS
+    syncMerge: syncMerge, keepDocs: keepDocs, blockedIds: blockedIds, stayLabel: stayLabel, stayDays: stayDays, MENU_DEFAULT: MENU_DEFAULT, menuOf: menuOf, normText: normText, matchItem: matchItem, parseBill: parseBill, flagText: flagText, flaggedLines: flaggedLines, statementLines: statementLines, dayDate: dayDate, MEALS: MEALS, billLines: billLines, chargeLines: chargeLines, applyCharges: applyCharges, validateGuest: validateGuest, validateCustom: validateCustom, docHtml: docHtml, upiOk: upiOk, qrPaths: qrPaths, upiLink: upiLink, amountInWords: amountInWords, biz: biz, fmtLong: fmtLong, maskId: maskId, importOld: importOld, oldRoomRate: oldRoomRate, COLLS: COLLS
   };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = AH;
