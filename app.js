@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var A = AH, inr = A.inr, num = A.num, r2 = A.r2;
-  var APP_VERSION = '2.1.0';
+  var APP_VERSION = '2.1.1';
 
   /* ---------- tiny helpers ---------- */
   function $(s, el) { return (el || document).querySelector(s); }

@@ -1293,10 +1293,12 @@ var AH = (function () {
   }
   function payQrHtml(st, B, amount, note, label) {
     var id = String((st || {}).upiId || '').trim();
-    if (!(amount > 0.005) || !upiOk(id)) return '';
-    var svg = qrPaths(upiLink(id, B.legalName || B.name, amount, note));
-    return '<table class="payqr"><tr>' + (svg ? '<td style="width:32mm">' + svg + '</td>' : '') + '<td><div class="small" style="color:#1e3a2b;font-weight:bold">' + h(label) + '</div>' +
-      '<div class="amt">' + inr(amount, true) + '</div><div class="small">' + (svg ? 'Scan with any UPI app (GPay, PhonePe, Paytm, BHIM). ' : '') + 'UPI ID: <b>' + h(id) + '</b>' + (note ? '<br>Please keep ' + h(note) + ' as the payment note.' : '') + '</div></td></tr></table>';
+    if (!upiOk(id)) return '';
+    /* 2.1.1: always shown once the UPI ID is set. Balance due → amount filled in; nothing due → plain QR, guest types the amount. */
+    var due = amount > 0.005;
+    var svg = qrPaths(upiLink(id, B.legalName || B.name, due ? amount : 0, note));
+    return '<table class="payqr"><tr>' + (svg ? '<td style="width:32mm">' + svg + '</td>' : '') + '<td><div class="small" style="color:#1e3a2b;font-weight:bold">' + h(due ? label : 'Pay by UPI') + '</div>' +
+      (due ? '<div class="amt">' + inr(amount, true) + '</div>' : '<div class="amt" style="font-size:11pt">' + h(B.legalName || B.name) + '</div>')+'<div class="small">' + (svg ? 'Scan with any UPI app (GPay, PhonePe, Paytm, BHIM). ' : '') + 'UPI ID: <b>' + h(id) + '</b>' + (note ? '<br>Please keep ' + h(note) + ' as the payment note.' : '') + '</div></td></tr></table>';
   }
   /* kind: 'confirmation' or 'invoice'. Returns a complete HTML fragment with its own styles (PDF and screen). */
   function docHtml(kind, b, data) {
